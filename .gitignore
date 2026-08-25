@@ -15,5 +15,8 @@ rclone.conf
 backup-key.txt
 *.age
 
+# Claude-Projektdateien (enthalten Infra-Bezüge) — nicht ins public Repo
+.claude/
+
 # macOS
 .DS_Store
