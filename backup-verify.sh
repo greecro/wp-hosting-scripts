@@ -54,7 +54,14 @@ verify_file() {
     local kind="$2"   # "files" oder "db"
 
     if [[ "$f" == *.age ]]; then
-        [[ ! -f "$AGE_KEY" ]] && { FAILED_FILES+=("$f (age-Key fehlt)"); return 1; }
+        if [[ ! -f "$AGE_KEY" ]]; then
+            # Privater Key liegt bewusst nicht auf dieser VM (zentral in 1Password,
+            # keys/wp-hosting age Stack-Key) — nur der öffentliche Recipient ist hier.
+            # Entschlüsselbarkeit wird zentral geprüft (verify-backups-central.sh).
+            # Hier nur Existenz/Größe, damit ein fehlender Key keinen Fehlalarm wirft.
+            [[ -s "$f" ]] || { FAILED_FILES+=("$f (leer)"); return 1; }
+            return 0
+        fi
         # Nur ein leichter Decrypt-Check: Header lesen
         age -d -i "$AGE_KEY" "$f" 2>/dev/null | head -c 1 >/dev/null || \
             { FAILED_FILES+=("$f (Entschlüsselung)"); return 1; }
