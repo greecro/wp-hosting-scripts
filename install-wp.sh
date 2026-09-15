@@ -922,6 +922,19 @@ if [[ "$SITE_TYPE" == "mainwp" ]]; then
     if [[ -f "${PLUGINS_DIR}/mainwp.zip" ]]; then
         install_local_zip "${PLUGINS_DIR}/mainwp.zip" "MainWP Dashboard"
         log "MainWP Dashboard installiert"
+
+        # MainWP hängt Auto-Sync/Update-Check standardmäßig NICHT in WP-Cron ein
+        # (Default mainwp_wp_cron=0) — ohne WP-Cron-Kopplung liefe die eigene
+        # Sync-Engine nur noch mit, wenn jemand zufällig das Dashboard im Browser
+        # öffnet (Loopback-on-Pageview). In Kombination mit unserem generellen
+        # DISABLE_WP_CRON=true (kein lokaler Cron, externer Trigger via Cronicle)
+        # bleibt sie sonst komplett still — real 2026-09-15 auf dash.janzin-holding.com
+        # gefunden: Sync-Timestamps 27 Tage eingefroren, erst durch manuellen
+        # Dashboard-Besuch wieder in Gang. Fix: MainWP an unseren ohnehin
+        # verifiziert zuverlässigen Cronicle→wp-cron.php-Trigger koppeln.
+        sudo -u "$SYSTEM_USER" wp option update mainwp_wp_cron 1 --path="$SITE_PATH" --allow-root \
+            && log "MainWP: eigene Cron-Jobs an WP-Cron gekoppelt (mainwp_wp_cron=1)" \
+            || warn "mainwp_wp_cron konnte nicht gesetzt werden — nach Install manuell prüfen"
     else
         warn "MainWP Dashboard ZIP fehlt: ${PLUGINS_DIR}/mainwp.zip — sync-plugins.sh ausführen"
     fi
