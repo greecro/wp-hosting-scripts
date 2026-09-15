@@ -219,15 +219,22 @@ PLUGIN_BUCKET="${PLUGIN_BUCKET:-}"; $NONINT || read -rp "Bucket-Name für Plugin
 
 THEME_BUCKET="${THEME_BUCKET:-}";   $NONINT || read -rp "Bucket-Name für Theme-ZIPs (z.B. wp-themes, leer = überspringen): " THEME_BUCKET
 
-# R2-Layout ist fix — im Config-Modus ohne gesetzten Bucket auf wp-plugins/wp-themes
+# media-Bucket: pro Site ein Unterordner (media/<domain>/), gezielter Pull statt
+# Full-Mirror — siehe sync-media.sh. Anders als Plugin/Theme kein globaler Stack.
+MEDIA_BUCKET="${MEDIA_BUCKET:-}";   $NONINT || read -rp "Bucket-Name für Logo/Favicon (z.B. media, leer = überspringen): " MEDIA_BUCKET
+
+# R2-Layout ist fix — im Config-Modus ohne gesetzten Bucket auf wp-plugins/wp-themes/media
 # defaulten, statt den Pro-Plugin/Theme-Sync still zu überspringen (Live-Bug 2026-07).
 if [[ "$RCLONE_REMOTE" == "r2" ]]; then
     [[ -z "$PLUGIN_BUCKET" ]] && { PLUGIN_BUCKET="wp-plugins"; info "PLUGIN_BUCKET nicht gesetzt → Default r2:wp-plugins"; }
     [[ -z "$THEME_BUCKET"  ]] && { THEME_BUCKET="wp-themes";   info "THEME_BUCKET nicht gesetzt → Default r2:wp-themes"; }
+    [[ -z "$MEDIA_BUCKET"  ]] && { MEDIA_BUCKET="media";       info "MEDIA_BUCKET nicht gesetzt → Default r2:media"; }
 fi
 [[ -n "$THEME_BUCKET"  ]] && info "Theme-Bucket:  ${BOLD}${RCLONE_REMOTE}:${THEME_BUCKET}${NC}"
+[[ -n "$MEDIA_BUCKET"  ]] && info "Media-Bucket:  ${BOLD}${RCLONE_REMOTE}:${MEDIA_BUCKET}${NC}"
 [[ -z "$PLUGIN_BUCKET" ]] && warn "PLUGIN_BUCKET leer — Pro-Plugins werden NICHT synchronisiert."
 [[ -z "$THEME_BUCKET"  ]] && warn "THEME_BUCKET leer — Blocksy-Theme wird NICHT synchronisiert."
+[[ -z "$MEDIA_BUCKET"  ]] && warn "MEDIA_BUCKET leer — Logo/Favicon-Sync (sync-media.sh) läuft ins Leere."
 
 # age-Verschlüsselung: Config-Variable ENABLE_AGE (true/false) oder interaktiv.
 if [[ -z "${ENABLE_AGE:-}" ]]; then
@@ -1155,6 +1162,14 @@ if [[ -f "$(dirname "$0")/fluentsmtp-configure.sh" ]]; then
     log "fluentsmtp-configure.sh installiert (/usr/local/sbin, SMTP-Creds via stdin)"
 fi
 
+# Logo-/Favicon-Sync auf die VM legen (kein Cron — wird pro Site von Hand oder aus der
+# Content-Phase heraus aufgerufen: sudo bash sync-media.sh --domain <domain>).
+if [[ -f "$(dirname "$0")/sync-media.sh" ]]; then
+    install -D -m 755 "$(dirname "$0")/sync-media.sh" /usr/local/bin/sync-media.sh
+    install -D -m 644 "$(dirname "$0")/media-import.php" /usr/local/lib/wp-hosting/media-import.php
+    log "sync-media.sh installiert (/usr/local/bin, Logo/Favicon aus media/<domain>/)"
+fi
+
 # Maintenance-Mode-Umschalter auf die VM legen (kein Cron — wird von Hand bzw. von
 # deploy-site.sh --go-live aufgerufen). Ohne das lag das Script nur im Repo und der
 # Wartungsmodus musste per rm auf dem Flag aufgehoben werden.
@@ -1353,6 +1368,7 @@ mkdir -p /etc/wp-hosting/plugins
     printf 'RCLONE_DEST=%q\n'    "${RCLONE_DEST:-}"
     printf 'PLUGIN_BUCKET=%q\n'  "${PLUGIN_BUCKET:-}"
     printf 'THEME_BUCKET=%q\n'   "${THEME_BUCKET:-}"
+    printf 'MEDIA_BUCKET=%q\n'   "${MEDIA_BUCKET:-}"
     printf 'SEOPRESS_KEY=%q\n'   "${SEOPRESS_KEY:-}"
     printf 'FLUENTFORM_KEY=%q\n' "${FLUENTFORM_KEY:-}"
     printf 'POSTX_KEY=%q\n'      "${POSTX_KEY:-}"

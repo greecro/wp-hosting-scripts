@@ -63,9 +63,12 @@ R2_BUCKET=wp-backups
 # SFTP_PATH=/backups
 # SFTP_PORT=22                # SSH-Key /root/.ssh/id_rsa muss am Ziel hinterlegt sein
 
-# ── Plugin-/Theme-Buckets (bei RCLONE_REMOTE=r2 optional — Default wp-plugins/wp-themes) ──
+# ── Plugin-/Theme-/Media-Buckets (bei RCLONE_REMOTE=r2 optional — Default wp-plugins/wp-themes/media) ──
 PLUGIN_BUCKET=wp-plugins
 THEME_BUCKET=wp-themes
+# MEDIA_BUCKET: Logo/Favicon pro Site, ein Unterordner je Domain (media/<domain>/),
+# gezielter Pull statt Full-Mirror — siehe sync-media.sh --domain <domain>.
+MEDIA_BUCKET=media
 
 # ── Monitoring (optional): IP des Netdata-Parents. Nur wenn gesetzt wird Port
 #    19999 in der Firewall für genau diese Quelle geöffnet (sonst bleibt 19999 zu). ──
