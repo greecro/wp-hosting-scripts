@@ -1617,18 +1617,26 @@ fi
 cat > "${SITE_PATH}/wp-content/mu-plugins/maintenance-mode.php" <<'MUPLUGIN'
 <?php
 /**
- * Maintenance Mode
+ * Maintenance Mode — "Coming Soon"-Platzhalter statt 503.
  *
  * Aktivieren:   touch wp-content/.maintenance-active
  * Deaktivieren: rm wp-content/.maintenance-active
  *
+ * Liefert bewusst HTTP 200 (nicht 503): (a) admin-ajax.php lief bei 503 nicht,
+ * damit scheiterte der MainWP-Connect-Handshake vor Go-Live; (b) dajaup/66uptime
+ * werten 503 als "down"; (c) FastCGI-Cache cacht nur 200er (siehe maintenance.sh),
+ * 503 blieb also ungecacht und war deshalb hier unproblematisch — das gilt jetzt
+ * andersrum: maintenance.sh purged den Cache bereits bei JEDEM Wechsel (live wie
+ * maintenance), das deckt auch diesen 200er ab.
+ *
  * Eingeloggte User (Admin) sehen die Seite immer normal.
- * wp-login.php und die MainWP-REST-API (/wp-json/mainwp/) sind immer erreichbar.
+ * wp-login.php, admin-ajax.php und die MainWP-REST-API (/wp-json/mainwp/) sind
+ * immer erreichbar.
  */
 
 // CLI und Cron nie blockieren — sonst sind wp-cli-Wartungsskripte (update-wp,
 // db-cleanup, health-check, rotate-keys …) auf einer Site im Maintenance-Mode
-// unbrauchbar, weil sie statt eines Ergebnisses die HTML-Wartungsseite erhielten.
+// unbrauchbar, weil sie statt eines Ergebnisses die HTML-Platzhalterseite erhielten.
 if ( ( defined( 'WP_CLI' ) && WP_CLI ) || ( defined( 'DOING_CRON' ) && DOING_CRON ) ) {
     return;
 }
@@ -1639,17 +1647,23 @@ if ( ! file_exists( $_wph_flag ) ) {
     return;
 }
 
+$_wph_uri = $_SERVER['REQUEST_URI'] ?? '';
+
 // wp-login.php immer durchlassen
-if ( isset( $_SERVER['REQUEST_URI'] ) &&
-     strpos( $_SERVER['REQUEST_URI'], 'wp-login.php' ) !== false ) {
+if ( strpos( $_wph_uri, 'wp-login.php' ) !== false ) {
+    return;
+}
+
+// admin-ajax.php immer durchlassen: MainWP-Connect (Dashboard → Child-Site) laeuft
+// darueber und muss auch vor dem eigentlichen Content-Go-Live funktionieren.
+if ( strpos( $_wph_uri, 'admin-ajax.php' ) !== false ) {
     return;
 }
 
 // MainWP-REST-API immer durchlassen: Dashboard-Fernsteuerung und Child-Anbindung
 // laufen per Consumer-Key-Auth und muessen auch im Wartungsmodus antworten. Nur die
 // mainwp-VM registriert /wp-json/mainwp/-Routen; auf Child-Sites 404 (harmlos).
-if ( isset( $_SERVER['REQUEST_URI'] ) &&
-     strpos( $_SERVER['REQUEST_URI'], '/wp-json/mainwp/' ) !== false ) {
+if ( strpos( $_wph_uri, '/wp-json/mainwp/' ) !== false ) {
     return;
 }
 
@@ -1660,17 +1674,47 @@ foreach ( array_keys( $_COOKIE ) as $_wph_key ) {
     }
 }
 
-http_response_code( 503 );
-header( 'Retry-After: 3600' );
+http_response_code( 200 );
 header( 'Content-Type: text/html; charset=UTF-8' );
 
 $_wph_host = htmlspecialchars( $_SERVER['HTTP_HOST'] ?? '', ENT_QUOTES, 'UTF-8' );
+
+// Matomo-Tracking auf der Platzhalterseite: erst moeglich, sobald provision-endpoint.sh
+// die idSite in die SEOpress-Option geschrieben hat (Phase 2, Schritt 4). Bis dahin
+// laeuft die Seite ohnehin noch nicht oeffentlich (DNS/Caddy erst Schritt 1-2 davor),
+// die kurze Luecke bleibt folgenlos. Kein WordPress-Boot noetig — get_option() reicht,
+// die DB-Verbindung steht auf mu-plugins-Ebene schon.
+$_wph_matomo_snippet = '';
+if ( function_exists( 'get_option' ) ) {
+    $_wph_seo = get_option( 'seopress_google_analytics_option_name' );
+    if ( is_array( $_wph_seo )
+        && ( $_wph_seo['seopress_google_analytics_matomo_enable'] ?? '' ) === '1'
+        && ! empty( $_wph_seo['seopress_google_analytics_matomo_id'] )
+        && ! empty( $_wph_seo['seopress_google_analytics_matomo_site_id'] ) ) {
+        $_wph_m_host = htmlspecialchars( $_wph_seo['seopress_google_analytics_matomo_id'], ENT_QUOTES, 'UTF-8' );
+        $_wph_m_site = (int) $_wph_seo['seopress_google_analytics_matomo_site_id'];
+        $_wph_matomo_snippet = <<<HTML
+<script>
+var _paq = window._paq = window._paq || [];
+_paq.push(['trackPageView']);
+_paq.push(['enableLinkTracking']);
+(function() {
+  var u = "https://{$_wph_m_host}/";
+  _paq.push(['setTrackerUrl', u + 'matomo.php']);
+  _paq.push(['setSiteId', '{$_wph_m_site}']);
+  var d = document, g = d.createElement('script'), s = d.getElementsByTagName('script')[0];
+  g.async = true; g.src = u + 'matomo.js'; s.parentNode.insertBefore(g, s);
+})();
+</script>
+HTML;
+    }
+}
 ?><!DOCTYPE html>
 <html lang="de">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Wartung &mdash; <?php echo $_wph_host; ?></title>
+<title><?php echo $_wph_host; ?></title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -1692,11 +1736,12 @@ $_wph_host = htmlspecialchars( $_SERVER['HTTP_HOST'] ?? '', ENT_QUOTES, 'UTF-8' 
 </head>
 <body>
 <div class="card">
-  <div class="icon">🔧</div>
-  <h1>Wartungsarbeiten</h1>
-  <p>Diese Seite wird gerade eingerichtet<br>und ist in Kürze verfügbar.</p>
+  <div class="icon">✨</div>
+  <h1>Gleich geht's los.</h1>
+  <p>Noch schrauben wir hier<br>— bald ist alles startklar.</p>
   <p class="domain"><?php echo $_wph_host; ?></p>
 </div>
+<?php echo $_wph_matomo_snippet; ?>
 </body>
 </html>
 <?php

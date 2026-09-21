@@ -526,7 +526,11 @@ sudo bash maintenance.sh
 ```
 
 - Zeigt alle Sites mit Status `[LIVE]` oder `[MAINTENANCE]`
-- Besucher sehen eine 503-Seite (dunkles Design, kein WordPress-Branding)
+- Besucher sehen eine "Coming Soon"-Platzhalterseite (HTTP 200, dunkles Design,
+  kein WordPress-Branding) statt der unfertigen Installation — inkl. Matomo-Tracking,
+  sobald die Site-ID gesetzt ist
+- admin-ajax.php, wp-login.php und die MainWP-REST-API bleiben immer erreichbar
+  (MainWP-Connect und Uptime-Monitor funktionieren daher schon vor dem echten Go-Live)
 - Admins können sich einloggen und normal arbeiten
 - Neue Sites starten automatisch im Maintenance Mode
 
