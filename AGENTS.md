@@ -7,7 +7,7 @@ Gemeinsame Instruktionsdatei für alle Agenten (Claude, Codex, Gemini);
 
 - Scripts und Schritt-für-Schritt: [README.md](README.md), Details in `docs/`
 - VM-Namen, IPs, VLAN, Gast-IDs: `~/Developer/KI/projects/proxmox-cluster/inventory.md`
-- Historie, Migrationsstand, erlebte Fallen: Dossier `project_wp_hosting.md`
+- Historie, Migrationsstand, erlebte Fallen: Wiki-Seite `project-wp-hosting`
 - Management-seitige Orchestrierung darüber: Repo `homelab-provisioning`
 
 ## Projektregeln
