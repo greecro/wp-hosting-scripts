@@ -102,6 +102,15 @@ for DOMAIN in "${SITES_TO_UPDATE[@]}"; do
     echo -e "${BLUE}──────────────────────────────────────────────${NC}"
     info "Aktualisiere: ${BOLD}${DOMAIN}${NC}"
 
+    # Lock je Domain, gemeinsam mit dashy-wp-update (Dashy): nie zwei Updates derselben Site zugleich
+    mkdir -p -m 700 /run/lock/wp-hosting
+    exec 9>"/run/lock/wp-hosting/${DOMAIN}.lock"
+    if ! flock -w 300 9; then
+        warn "  Site ist gesperrt (anderes Update läuft) — übersprungen"
+        SKIPPED+=("$DOMAIN"); exec 9>&-
+        continue
+    fi
+
     WP_CMD="wp --path=${SITE_PATH} --allow-root"
     SITE_OK=true
 
@@ -180,6 +189,7 @@ for DOMAIN in "${SITES_TO_UPDATE[@]}"; do
     else
         FAILED+=("$DOMAIN")
     fi
+    exec 9>&-
 done
 
 # ── FastCGI Cache leeren (WooCommerce-VMs) ────────────────────────────────

@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# dashy-wp-update — Einzel-Update eines Plugins oder Themes mit Snapshot und Rollback,
+# der erste und einzige Schreibpfad des Management-Dashboards "Dashy".
+#
+# Aufruf (über sudoers, als root; der SSH-Weg führt über dashy-gate):
+#   sudo -n /usr/local/sbin/dashy-wp-update <domain> plugin|theme <slug>
+#   sudo -n /usr/local/sbin/dashy-wp-update <domain> rollback <snapshot-id>
+#
+# Zuschnitt (bewusst eng):
+#   - genau EIN Slug je Aufruf: kein --all, keine Installation, kein Core-Update
+#   - Snapshot vor dem Update: tar.gz des Plugin-/Theme-Verzeichnisses plus DB-Dump
+#     (als Site-User per `wp db export -`, kein Passwort in argv) unter
+#     /var/backups/wp-hosting/<domain>/dashy-<YYYYmmdd-HHMMSS>-<slug>/ (root 700),
+#     Retention: die letzten 5 Snapshots je Domain (je Domain, nicht je Slug)
+#   - Root fasst im Webroot NICHTS an: tar, mktemp, mv und rm dort laufen als Site-User
+#     (runuser), damit ein Symlink-Tausch durch den Site-User nie Root-Rechte bekommt;
+#     root schreibt und liest nur das Snapshot-Verzeichnis
+#   - Update als Site-User (runuser, env -i, erzwungenes --path, keine wp-cli-Config)
+#   - Smoke-Test danach: Status vorher = nachher, `core is-installed`, HTTP-Status der
+#     Startseite lokal über nginx (Host-Header), Versionsvergleich
+#   - Rollback: Verzeichnis aus dem tar zurück (als Site-User in Temp entpacken, Mitglieder
+#     vorher prüfen, dann mv-Tausch); funktioniert auch, wenn das Zielverzeichnis fehlt
+#     (abgebrochenes Update). Der DB-Dump bleibt liegen und wird im JSON genannt.
+#   - Ausgabe genau eine JSON-Zeile:
+#     {ok, kind, slug, old_version, new_version, snapshot, db_dump, smoke:{…}, error}
+#   - Ablehnung = Exit 77 ohne JSON; fehlgeschlagenes Update = Exit 1 mit JSON
+#   - jede Ausführung und Ablehnung als Zeile in journald (logger -t dashy); Fremdtext
+#     (wp-Ausgabe, Versionen) kommt nur geprüft bzw. maskiert ins Log und ins JSON
+#   - ein Lock je Domain (/run/lock/wp-hosting/<domain>.lock, auch von update-wp.sh genutzt)
+#   - SIGHUP/SIGPIPE (SSH-Abbruch) werden ignoriert: ein begonnener Lauf läuft zu Ende
+set -euo pipefail
+trap '' HUP PIPE
+cd /
+
+WP_BIN="/usr/local/bin/wp"
+WWW_ROOT="/var/www"
+SITES_DIR="/etc/wp-hosting/sites"
+BACKUP_ROOT="/var/backups/wp-hosting"
+LOCK_DIR="/run/lock/wp-hosting"
+KEEP=5
+MIN_FREE_KB=524288
+EXIT_DENIED=77
+HTTP_TIMEOUT=20
+
+SLUG_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$'
+SNAP_RE='^dashy-[0-9]{8}-[0-9]{6}-[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$'
+USER_RE='^[a-z_][a-z0-9_]{0,31}$'
+DOMAIN_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+VERSION_RE='^[0-9A-Za-z.+_~-]{1,40}$'
+STATUS_RE='^[a-z-]{1,20}$'
+
+# ── Helfer ──────────────────────────────────────────────────────────────────
+now_ms() { local us="${EPOCHREALTIME:-0.0}"; us="${us/./}"; echo $(( 10#${us} / 1000 )); }
+json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\t'/\\t}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/}"; printf '%s' "$s"; }
+# Fremdtext (wp-Ausgabe) für das JSON: URLs und Schlüssel maskiert, nur druckbare Zeichen, begrenzt
+clean() {
+    printf '%s' "$1" \
+        | sed -E 's#https?://[^ "'"'"'<>]+#<url>#g; s/(key|token|license|licence|password|secret|pass)=[^ &"]+/\1=<maskiert>/Ig' \
+        | tr -d '\000-\011\013-\037\177' | tr '\n' ' ' | cut -c1-300
+}
+# Versions-/Statusfeld fürs Log: nur, wenn es wie eines aussieht
+safe() { [[ "$1" =~ $2 ]] && printf '%s' "$1" || printf '?'; }
+
+LOG_DOMAIN="-"; LOG_CMD="-"; T_START=$(now_ms)
+log_line() {  # log_line <exit> <reason> <extra>
+    logger -t dashy -p auth.info -- \
+        "site=${LOG_DOMAIN} caller=${SUDO_USER:-?} runas=root exit=$1 ms=$(( $(now_ms) - T_START )) reason=$2 cmd=${LOG_CMD} $3" 2>/dev/null || true
+}
+deny() {  # deny <reason> — feste Gründe, keine Argumentwerte ins Log, nur Anzahl und Hash
+    local h; h=$(printf '%s\0' "${ORIG_ARGS[@]}" | sha256sum | cut -c1-12)
+    log_line "$EXIT_DENIED" "$1" "argc=${#ORIG_ARGS[@]} sha=${h}"
+    echo "dashy-wp-update: abgelehnt ($1)" >&2
+    exit "$EXIT_DENIED"
+}
+
+# ── Prüfung der Kommandozeile (reine Funktion, auch für --selftest) ────────
+# stdout: "<mode> <domain> <arg>" (ok) bzw. Grund ohne Argumentwerte (abgelehnt); Rückgabe 0/1.
+check_args() {
+    [[ $# -eq 3 ]] || { echo "genau drei argumente: <domain> plugin|theme|rollback <slug|snapshot-id>"; return 1; }
+    local domain="$1" mode="$2" arg="$3"
+    [[ -n "$domain" && -n "$mode" && -n "$arg" ]] || { echo "leeres argument"; return 1; }
+    [[ "$domain" =~ $DOMAIN_RE && "$domain" != *..* && ${#domain} -le 253 ]] || { echo "ungültige domain"; return 1; }
+    case "$mode" in
+        plugin|theme)
+            [[ "$arg" =~ $SLUG_RE && "$arg" != . && "$arg" != .. ]] || { echo "ungültiger slug"; return 1; } ;;
+        rollback)
+            [[ "$arg" =~ $SNAP_RE ]] || { echo "ungültige snapshot-id"; return 1; } ;;
+        *) echo "modus nicht erlaubt"; return 1 ;;
+    esac
+    echo "$mode $domain $arg"
+    return 0
+}
+
+# Archiv-Mitglieder: ausschließlich "<slug>" bzw. "<slug>/…", nie "..", nie absolut (reine Funktion)
+check_members() {  # check_members <slug> <listing>
+    local slug="$1" members="$2"
+    [[ -n "$members" ]] || return 1
+    grep -qE '(^|/)\.\.(/|$)|^/' <<<"$members" && return 1
+    grep -qvE "^${slug//./\\.}(/|$)" <<<"$members" && return 1
+    return 0
+}
+
+selftest() {
+    local fails=0
+    t() {  # t <erwartet: ok|deny> <args…>
+        local want="$1"; shift
+        local out rc=0
+        out=$(check_args "$@") || rc=1
+        if { [[ "$want" == ok && $rc -eq 0 ]] || [[ "$want" == deny && $rc -eq 1 ]]; }; then
+            printf '  ok    %-5s %s\n' "$want" "$*"
+        else
+            printf '  FAIL  %-5s %s  -> %s\n' "$want" "$*" "$out"; fails=$((fails+1))
+        fi
+    }
+    m() {  # m <erwartet: ok|deny> <slug> <listing>
+        local want="$1" rc=0; check_members "$2" "$3" || rc=1
+        if { [[ "$want" == ok && $rc -eq 0 ]] || [[ "$want" == deny && $rc -eq 1 ]]; }; then
+            printf '  ok    %-5s members %s: %s\n' "$want" "$2" "${3//$'\n'/ | }"
+        else
+            printf '  FAIL  %-5s members %s: %s\n' "$want" "$2" "${3//$'\n'/ | }"; fails=$((fails+1))
+        fi
+    }
+    echo "dashy-wp-update selftest"
+    t ok   example.com plugin two-factor
+    t ok   example.com plugin Akismet_2.0
+    t ok   example.com theme blocksy
+    t ok   example.com rollback dashy-20261012-181500-two-factor
+    t ok   example.com rollback dashy-20261012-181500-blocksy
+    t deny example.com plugin
+    t deny example.com plugin --all
+    t deny example.com plugin "two-factor --all"
+    t deny example.com plugin ../hello
+    t deny example.com plugin .
+    t deny example.com plugin ..
+    t deny example.com plugin .hidden
+    t deny example.com plugin "a;id"
+    t deny example.com plugin "a b"
+    t deny example.com plugin ""
+    t deny example.com core update
+    t deny example.com plugin two-factor extra
+    t deny example.com install two-factor
+    t deny example.com update two-factor
+    t deny "example.com/.." plugin two-factor
+    t deny "Example.com" plugin two-factor
+    t deny "../etc" plugin two-factor
+    t deny example.com rollback two-factor
+    t deny example.com rollback dashy-20261012-181500-../x
+    t deny example.com rollback "dashy-20261012-181500-x y"
+    t deny example.com rollback /var/backups/wp-hosting/x
+    t deny "" plugin two-factor
+    m ok   two-factor $'two-factor/\ntwo-factor/readme.txt\ntwo-factor/inc/x.php'
+    m ok   two-factor $'two-factor'
+    m deny two-factor $'two-factor/\ntwo-factor/../../etc/x'
+    m deny two-factor $'two-factor/\n../x'
+    m deny two-factor $'two-factor/\n/etc/passwd'
+    m deny two-factor $'two-factor/\ntwo-factor-pro/x'
+    m deny two-factor $'other/x'
+    m deny two-factor ''
+    m deny two.factor $'twoXfactor/x'
+    echo "fehler: ${fails}"
+    [[ $fails -eq 0 ]]
+}
+
+# ── Als Site-User: wp-cli gehärtet wie in dashy-wp, Dateioperationen im Webroot ──
+as_user() { runuser -u "$SYSTEM_USER" -- "$@"; }
+wp_user() {  # wp_user <args…>
+    as_user env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent LANG=C.UTF-8 \
+            WP_CLI_CONFIG_PATH=/dev/null WP_CLI_PACKAGES_DIR=/nonexistent \
+            WP_CLI_DISABLE_AUTO_CHECK_UPDATE=1 \
+            "$WP_BIN" --path="$SITE_PATH" --skip-packages --no-color "$@"
+}
+# Kurze Antwort eines wp-Aufrufs, nie abbrechen: leer bei Fehler
+wp_field() { local out; out=$(wp_user "$@" 2>/dev/null) || out=""; clean "$out"; }
+
+site_field() {  # site_field <label> — nur erlaubte Labels, Passwortzeilen werden nie angefasst
+    case "$1" in System-User|Site-Pfad) ;; *) echo "dashy-wp-update: label $1 nicht erlaubt" >&2; exit 3 ;; esac
+    awk -v l="$1" 'index($0, l ":") == 1 { sub("^" l ":[ \t]*", ""); print; exit }' "$SITE_FILE"
+}
+
+http_status() {  # Startseite lokal über nginx mit Host-Header; "000" bei Verbindungsfehler
+    local code
+    code=$(curl -s -o /dev/null -m "$HTTP_TIMEOUT" -w '%{http_code}' -H "Host: ${DOMAIN}" -A "dashy-smoke" http://127.0.0.1/ 2>/dev/null) || code="000"
+    [[ "$code" =~ ^[0-9]{3}$ ]] || code="000"
+    printf '%s' "$code"
+}
+
+OK=false; ERROR=""; OLD_VERSION=""; NEW_VERSION=""; SNAPSHOT=""; DB_DUMP=""
+STATUS_BEFORE=""; STATUS_AFTER=""; IS_INSTALLED=""; HTTP=""; MODE=""; SLUG=""
+emit() {  # emit <exit> — erst Log, dann JSON (stdout kann bei SSH-Abbruch zu sein)
+    local ok_json=false; $OK && ok_json=true
+    log_line "$1" "$( $OK && echo ok || echo fehler )" \
+        "slug=${SLUG} snapshot=${SNAPSHOT##*/} old=$(safe "$OLD_VERSION" "$VERSION_RE") new=$(safe "$NEW_VERSION" "$VERSION_RE") http=$(safe "$HTTP" '^[0-9]{3}$')"
+    printf '{"ok":%s,"kind":"%s","slug":"%s","old_version":"%s","new_version":"%s","snapshot":"%s","db_dump":"%s","smoke":{"status_before":"%s","status_after":"%s","is_installed":"%s","http":"%s"},"error":"%s"}\n' \
+        "$ok_json" "$(json_escape "$MODE")" "$(json_escape "$SLUG")" "$(json_escape "$OLD_VERSION")" "$(json_escape "$NEW_VERSION")" \
+        "$(json_escape "$SNAPSHOT")" "$(json_escape "$DB_DUMP")" "$(json_escape "$STATUS_BEFORE")" "$(json_escape "$STATUS_AFTER")" \
+        "$(json_escape "$IS_INSTALLED")" "$(json_escape "$HTTP")" "$(json_escape "$ERROR")" || true
+    exit "$1"
+}
+fail() { OK=false; ERROR="$(clean "$1")"; emit 1; }
+# Unerwarteter Abbruch (set -e): trotzdem Logzeile und JSON
+trap 'rc=$?; [[ $rc -eq 0 || $rc -eq 1 || $rc -eq 77 ]] || { ERROR="unerwarteter abbruch (exit ${rc})"; OK=false; emit 1; }' EXIT
+
+# ── Hauptprogramm ──────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--selftest" ]]; then trap - EXIT; selftest; exit $?; fi
+ORIG_ARGS=("$@")
+[[ $EUID -eq 0 ]] || { trap - EXIT; echo "dashy-wp-update: muss als root laufen (sudo -n)" >&2; exit 2; }
+
+CHECK=$(check_args "$@") || deny "$CHECK"
+read -r MODE DOMAIN ARG <<<"$CHECK"
+LOG_DOMAIN="$DOMAIN"; LOG_CMD="update:${MODE}"
+
+SITE_FILE="${SITES_DIR}/${DOMAIN}.txt"
+[[ -f "$SITE_FILE" && ! -L "$SITE_FILE" ]] || deny "site unbekannt"
+SYSTEM_USER=$(site_field System-User)
+[[ "$SYSTEM_USER" =~ $USER_RE && "$SYSTEM_USER" != root ]] || deny "system-user ungültig"
+[[ " $(id -nG "$SYSTEM_USER" 2>/dev/null) " == *" sftpusers "* ]] || deny "system-user nicht in sftpusers"
+SITE_UID=$(id -u "$SYSTEM_USER")
+SITE_PATH=$(site_field Site-Pfad); [[ -n "$SITE_PATH" ]] || SITE_PATH="${WWW_ROOT}/${DOMAIN}"
+[[ "$SITE_PATH" == "${WWW_ROOT}/${DOMAIN}" ]] || deny "site-pfad außerhalb von ${WWW_ROOT}"
+[[ -d "$SITE_PATH" && ! -L "$SITE_PATH" ]] || deny "site-pfad fehlt"
+[[ "$(stat -c %u "$SITE_PATH")" == "$SITE_UID" ]] || deny "system-user besitzt site nicht"
+
+# Lock je Domain (gemeinsam mit update-wp.sh): parallele Updates derselben Site gibt es nicht
+install -d -m 700 -o root -g root "$LOCK_DIR"
+exec 9>"${LOCK_DIR}/${DOMAIN}.lock"
+flock -n 9 || deny "läuft bereits"
+
+if [[ "$MODE" == rollback ]]; then
+    SNAP_DIR="${BACKUP_ROOT}/${DOMAIN}/${ARG}"
+    [[ -d "$SNAP_DIR" && ! -L "$SNAP_DIR" && "$(stat -c %u "$SNAP_DIR")" == 0 ]] || deny "snapshot fehlt"
+    [[ -f "${SNAP_DIR}/meta" && -f "${SNAP_DIR}/files.tar.gz" ]] || deny "snapshot unvollständig"
+    # meta (root-geschrieben): "kind=", "slug=", "status=" — trotzdem gegen die Muster geprüft
+    KIND=$(awk -F= '$1=="kind" && ($2=="plugin" || $2=="theme") {print $2; exit}' "${SNAP_DIR}/meta")
+    SLUG=$(awk -F= '$1=="slug" {print $2; exit}' "${SNAP_DIR}/meta")
+    META_STATUS=$(awk -F= '$1=="status" {print $2; exit}' "${SNAP_DIR}/meta")
+    [[ -n "$KIND" && "$SLUG" =~ $SLUG_RE && "$SLUG" != . && "$SLUG" != .. ]] || deny "snapshot-meta ungültig"
+    [[ "$META_STATUS" =~ $STATUS_RE ]] || META_STATUS=""
+    SNAPSHOT="$SNAP_DIR"
+    [[ -f "${SNAP_DIR}/db.sql.gz" ]] && DB_DUMP="${SNAP_DIR}/db.sql.gz"
+else
+    KIND="$MODE"; SLUG="$ARG"
+fi
+PARENT="${SITE_PATH}/wp-content/${KIND}s"
+TARGET="${PARENT}/${SLUG}"
+[[ -d "$PARENT" && ! -L "$PARENT" && "$(stat -c %u "$PARENT")" == "$SITE_UID" ]] || deny "${KIND}-verzeichnis fehlt oder fremder besitzer"
+if [[ "$MODE" != rollback ]]; then
+    [[ -d "$TARGET" && ! -L "$TARGET" ]] || deny "${KIND} nicht installiert"
+    [[ "$(stat -c %u "$TARGET")" == "$SITE_UID" ]] || deny "${KIND}-verzeichnis gehört nicht dem site-user"
+fi
+
+# ── Rollback ───────────────────────────────────────────────────────────────
+if [[ "$MODE" == rollback ]]; then
+    if [[ -e "$TARGET" ]]; then
+        OLD_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
+        STATUS_BEFORE=$(wp_field "$KIND" get "$SLUG" --field=status)
+    else
+        STATUS_BEFORE="fehlt"   # abgebrochenes Update: Verzeichnis ist weg, nur einsetzen
+    fi
+    # Listing erst in eine Variable: grep -q würde tar per SIGPIPE beenden und pipefail das Ergebnis kippen
+    MEMBERS=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || fail "archiv nicht lesbar"
+    check_members "$SLUG" "$MEMBERS" || fail "archiv enthält fremde pfade"
+    # Alles im Webroot als Site-User: Temp anlegen, entpacken, tauschen, aufräumen
+    TMP=$(as_user mktemp -d -p "$PARENT" ".dashy-rollback.XXXXXX") || fail "temp-verzeichnis nicht anlegbar"
+    as_user tar -xzf - -C "$TMP" --no-same-owner --no-same-permissions < "${SNAP_DIR}/files.tar.gz" \
+        || { as_user rm -rf -- "$TMP"; fail "entpacken fehlgeschlagen"; }
+    [[ -d "${TMP}/${SLUG}" && ! -L "${TMP}/${SLUG}" ]] || { as_user rm -rf -- "$TMP"; fail "archiv ohne ${SLUG}/"; }
+    OLD_DIR="${PARENT}/.dashy-old.${SLUG}.$$"
+    if [[ -e "$TARGET" ]]; then
+        as_user mv -T -- "$TARGET" "$OLD_DIR" || { as_user rm -rf -- "$TMP"; fail "verzeichnis nicht verschiebbar"; }
+    fi
+    if ! as_user mv -T -- "${TMP}/${SLUG}" "$TARGET"; then
+        [[ -e "$OLD_DIR" ]] && as_user mv -T -- "$OLD_DIR" "$TARGET" || true
+        as_user rm -rf -- "$TMP"
+        fail "zurückkopieren fehlgeschlagen"
+    fi
+    as_user rm -rf -- "$TMP" "$OLD_DIR" || true
+    wp_user cache flush >/dev/null 2>&1 || true
+    NEW_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
+    STATUS_AFTER=$(wp_field "$KIND" get "$SLUG" --field=status)
+    IS_INSTALLED=$( wp_user core is-installed >/dev/null 2>&1 && echo yes || echo no )
+    HTTP=$(http_status)
+    EXPECT="${META_STATUS:-$STATUS_BEFORE}"
+    if [[ -n "$NEW_VERSION" && "$STATUS_AFTER" == "$EXPECT" && "$IS_INSTALLED" == yes && "$HTTP" =~ ^[23] ]]; then
+        OK=true; emit 0
+    fi
+    fail "smoke-test nach rollback fehlgeschlagen (status ${STATUS_BEFORE}->${STATUS_AFTER}, erwartet ${EXPECT}, installed=${IS_INSTALLED}, http=${HTTP})"
+fi
+
+# ── Update ─────────────────────────────────────────────────────────────────
+OLD_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
+[[ -n "$OLD_VERSION" ]] || fail "${KIND} ${SLUG}: version nicht lesbar"
+STATUS_BEFORE=$(wp_field "$KIND" get "$SLUG" --field=status)
+UPD=$(wp_field "$KIND" get "$SLUG" --field=update)
+[[ "$UPD" == available ]] || fail "${KIND} ${SLUG}: kein update verfügbar (update=${UPD:-?})"
+
+# Snapshot (root schreibt nur hier; der Site-User liefert tar und Dump über stdout)
+install -d -m 700 -o root -g root "$BACKUP_ROOT" "${BACKUP_ROOT}/${DOMAIN}"
+FREE_KB=$(df --output=avail -k "$BACKUP_ROOT" | tail -n 1 | tr -d ' ')
+[[ "$FREE_KB" =~ ^[0-9]+$ && "$FREE_KB" -ge "$MIN_FREE_KB" ]] || fail "zu wenig platz unter ${BACKUP_ROOT} (${FREE_KB:-?} kB frei)"
+TS=$(date +%Y%m%d-%H%M%S)
+SNAP_DIR="${BACKUP_ROOT}/${DOMAIN}/dashy-${TS}-${SLUG}"
+[[ ! -e "$SNAP_DIR" ]] || fail "snapshot-verzeichnis existiert schon"
+mkdir -m 700 "$SNAP_DIR"
+printf 'kind=%s\nslug=%s\nold_version=%s\nstatus=%s\nts=%s\n' "$KIND" "$SLUG" "$(safe "$OLD_VERSION" "$VERSION_RE")" "$(safe "$STATUS_BEFORE" "$STATUS_RE")" "$TS" > "${SNAP_DIR}/meta"
+if ! as_user tar -czf - -C "$PARENT" -- "$SLUG" > "${SNAP_DIR}/files.tar.gz" 2>/dev/null; then
+    rm -rf "$SNAP_DIR"; fail "datei-snapshot fehlgeschlagen"
+fi
+MEMBERS=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || MEMBERS=""
+check_members "$SLUG" "$MEMBERS" || { rm -rf "$SNAP_DIR"; fail "datei-snapshot unbrauchbar"; }
+# DB-Dump als Site-User nach stdout (Passwort bleibt bei wp-cli in MYSQL_PWD, nie in argv), gzip als root
+DB_ERR=$(mktemp "${SNAP_DIR}/.dberr.XXXXXX")
+set +e
+wp_user db export - --skip-plugins --skip-themes --single-transaction --quick --add-drop-table 2>"$DB_ERR" | gzip > "${SNAP_DIR}/db.sql.gz"
+DB_RC=("${PIPESTATUS[@]}")
+set -e
+DB_TAIL=$( { zcat "${SNAP_DIR}/db.sql.gz" 2>/dev/null | tail -n 1; } || true )
+if [[ "${DB_RC[0]}" -ne 0 || "${DB_RC[1]}" -ne 0 ]] || ! gzip -t "${SNAP_DIR}/db.sql.gz" 2>/dev/null || [[ "$DB_TAIL" != *"Dump completed"* ]]; then
+    MSG=$(grep -E 'Error|error|denied|failed' "$DB_ERR" | head -1 || true)
+    rm -rf "$SNAP_DIR"; fail "db-dump fehlgeschlagen (rc=${DB_RC[0]}/${DB_RC[1]}): ${MSG}"
+fi
+rm -f "$DB_ERR"
+chmod 600 "${SNAP_DIR}"/*
+SNAPSHOT="$SNAP_DIR"; DB_DUMP="${SNAP_DIR}/db.sql.gz"
+# Retention: die letzten KEEP Snapshots je Domain (Namen sortieren chronologisch)
+mapfile -t OLD_SNAPS < <(find "${BACKUP_ROOT}/${DOMAIN}" -mindepth 1 -maxdepth 1 -type d -name 'dashy-*' -printf '%f\n' | sort | head -n -"$KEEP")
+for s in "${OLD_SNAPS[@]}"; do rm -rf "${BACKUP_ROOT:?}/${DOMAIN:?}/${s:?}"; done
+
+# Update
+set +e
+UPD_OUT=$(wp_user "$KIND" update "$SLUG" 2>&1); UPD_RC=$?
+set -e
+NEW_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
+STATUS_AFTER=$(wp_field "$KIND" get "$SLUG" --field=status)
+wp_user cache flush >/dev/null 2>&1 || true
+IS_INSTALLED=$( wp_user core is-installed >/dev/null 2>&1 && echo yes || echo no )
+HTTP=$(http_status)
+if [[ $UPD_RC -ne 0 ]]; then
+    fail "wp ${KIND} update exit ${UPD_RC}: $(printf '%s' "$UPD_OUT" | grep -E 'Error|Warning' | head -2 | tr '\n' ' ')"
+fi
+if [[ "$NEW_VERSION" == "$OLD_VERSION" ]]; then
+    fail "version unverändert (${OLD_VERSION}): $(printf '%s' "$UPD_OUT" | grep -E 'Error|Warning|Success' | head -1)"
+fi
+if [[ "$STATUS_AFTER" != "$STATUS_BEFORE" || "$IS_INSTALLED" != yes || ! "$HTTP" =~ ^[23] ]]; then
+    fail "smoke-test fehlgeschlagen (status ${STATUS_BEFORE}->${STATUS_AFTER}, installed=${IS_INSTALLED}, http=${HTTP}) — rollback: ${SNAP_DIR##*/}"
+fi
+OK=true; emit 0

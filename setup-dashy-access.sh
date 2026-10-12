@@ -10,8 +10,8 @@
 #   - /etc/ssh/authorized_keys.d/dashy (root 644): restrict,from="<from>" <pubkey>
 #   - Match User dashy am Ende von /etc/ssh/sshd_config (kein TTY, kein Forwarding,
 #     ForceCommand dashy-gate — keine freie Shell, nur die zwei erlaubten Aufrufe)
-#   - /etc/sudoers.d/dashy: dashy-wp als %sftpusers, dashy-sites als root
-#   - /usr/local/sbin/dashy-gate (755), dashy-wp (755), dashy-sites (700)
+#   - /etc/sudoers.d/dashy: dashy-wp als %sftpusers, dashy-sites und dashy-wp-update als root
+#   - /usr/local/sbin/dashy-gate (755), dashy-wp (755), dashy-sites (700), dashy-wp-update (700)
 #   - ufw: 22/tcp aus <from>
 # Die PVE-Firewall (<vmid>.fw) bleibt Handarbeit — Hinweis am Ende.
 set -euo pipefail
@@ -47,11 +47,14 @@ FINGERPRINT=$(ssh-keygen -lf /dev/stdin <<<"$PUBKEY" 2>/dev/null) || err "--pubk
 log "Public Key gültig: ${FINGERPRINT}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-for h in dashy-gate dashy-wp dashy-sites; do
+for h in dashy-gate dashy-wp dashy-sites dashy-wp-update; do
     [[ -f "${SCRIPT_DIR}/${h}" ]] || err "Helfer fehlt neben dem Script: ${SCRIPT_DIR}/${h}"
 done
-bash -n "${SCRIPT_DIR}/dashy-gate" && bash -n "${SCRIPT_DIR}/dashy-wp" && bash -n "${SCRIPT_DIR}/dashy-sites" || err "Helfer haben Syntaxfehler"
+bash -n "${SCRIPT_DIR}/dashy-gate" && bash -n "${SCRIPT_DIR}/dashy-wp" && bash -n "${SCRIPT_DIR}/dashy-sites" \
+    && bash -n "${SCRIPT_DIR}/dashy-wp-update" || err "Helfer haben Syntaxfehler"
 bash "${SCRIPT_DIR}/dashy-wp" --selftest >/dev/null || err "dashy-wp --selftest schlägt fehl"
+bash "${SCRIPT_DIR}/dashy-wp-update" --selftest >/dev/null || err "dashy-wp-update --selftest schlägt fehl"
+for c in flock curl tar gzip runuser; do command -v "$c" >/dev/null || err "Werkzeug fehlt: ${c}"; done
 getent group sftpusers >/dev/null || err "Gruppe sftpusers fehlt — erst setup-web.sh ausführen"
 
 # ── User ───────────────────────────────────────────────────────────────────
@@ -80,7 +83,8 @@ log "User ${DASHY_USER}: Passwort gesperrt, nicht in sudo/sftpusers"
 install -D -m 755 -o root -g root "${SCRIPT_DIR}/dashy-gate"  /usr/local/sbin/dashy-gate
 install -D -m 755 -o root -g root "${SCRIPT_DIR}/dashy-wp"    /usr/local/sbin/dashy-wp
 install -D -m 700 -o root -g root "${SCRIPT_DIR}/dashy-sites" /usr/local/sbin/dashy-sites
-log "Helfer installiert: /usr/local/sbin/dashy-gate (755), dashy-wp (755), dashy-sites (700)"
+install -D -m 700 -o root -g root "${SCRIPT_DIR}/dashy-wp-update" /usr/local/sbin/dashy-wp-update
+log "Helfer installiert: /usr/local/sbin/dashy-gate (755), dashy-wp (755), dashy-sites (700), dashy-wp-update (700)"
 
 # ── Authorized Keys (root-eigen, Dashy kann sie nicht ändern) ──────────────
 AK_DIR="/etc/ssh/authorized_keys.d"; AK_FILE="${AK_DIR}/${DASHY_USER}"
@@ -127,9 +131,11 @@ log "sshd-Config geprüft (ForceCommand, kein TTY, kein Forwarding) und neu gela
 SUDOERS_FILE="/etc/sudoers.d/${DASHY_USER}"
 SUDOERS_TMP=$(mktemp /etc/sudoers.d/.dashy.XXXXXX); TMP_FILES+=("$SUDOERS_TMP")
 cat > "$SUDOERS_TMP" <<SUDOEOF
-# Dashy: Read-only wp-cli als Site-User, Registry als root. Verwaltet von setup-dashy-access.sh
+# Dashy: Read-only wp-cli als Site-User, Registry und Einzel-Update mit Snapshot als root.
+# Verwaltet von setup-dashy-access.sh
 ${DASHY_USER} ALL=(%sftpusers) NOPASSWD: /usr/local/sbin/dashy-wp
 ${DASHY_USER} ALL=(root) NOPASSWD: /usr/local/sbin/dashy-sites
+${DASHY_USER} ALL=(root) NOPASSWD: /usr/local/sbin/dashy-wp-update
 SUDOEOF
 chmod 440 "$SUDOERS_TMP"; chown root:root "$SUDOERS_TMP"
 visudo -cf "$SUDOERS_TMP" >/dev/null || { rm -f "$SUDOERS_TMP"; err "sudoers-Syntax ungültig — nichts geändert"; }
@@ -160,3 +166,4 @@ log "Dashy-Zugang eingerichtet."
 warn "PVE-Firewall nicht vergessen: in /etc/pve/firewall/<vmid>.fw eine IN-Regel ACCEPT tcp dport 22 source ${FROM}"
 info "Test vom Dashy-Host:  ssh ${DASHY_USER}@<vm-ip> sudo -n /usr/local/sbin/dashy-sites"
 info "                      ssh ${DASHY_USER}@<vm-ip> sudo -n -u <siteuser> /usr/local/sbin/dashy-wp <domain> core version"
+info "                      ssh ${DASHY_USER}@<vm-ip> sudo -n /usr/local/sbin/dashy-wp-update <domain> plugin <slug>"
