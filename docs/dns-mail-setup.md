@@ -45,7 +45,7 @@ Readiness prüfen: `bash check-dns.sh <domain> --ip <server-ip> --dkim <ses-toke
 2. SES Production Access beantragen (einmalig).
 3. `bash check-dns.sh <domain> --ip <ip> --dkim <token>` → bis alles „bereit".
 4. Erst dann `install-wp.sh` je Site — Pre-Flight-Check ist dann grün.
-5. FluentSMTP-Connection je Shop nachziehen (oder über MainWP ausrollen).
+5. FluentSMTP-Connection je Shop nachziehen.
 
 ## Schnell-Check eines fertigen Setups
 ```bash

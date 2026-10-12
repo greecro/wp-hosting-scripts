@@ -18,7 +18,6 @@ und Filebrowser-User** — sauber voneinander isoliert.
 - 📊 **Tracking lean & DSGVO-konform** — Matomo (cookieless) + Pixel Manager (alle Ad-Plattformen + CAPI) + FAZ Consent. Kein GA4/GTM.
 - 🔒 **Härtung out-of-the-box** — fail2ban, Rate-Limits, 2FA, Chroot-SFTP, Vhost-Hardening
 - 💾 **Backups + Monitoring** — täglich Files & DB, 7-Tage-Mirror nach R2/S3/SFTP (optional age-verschlüsselt), Backup-Verify, Disk-/SSL-Alerts
-- 🛠️ **MainWP-Dashboard** — eigene VM-Vorlage für zentrale Update-Verwaltung aller Child-Sites
 - 🔁 **Reproduzierbar** — config-getriebener, non-interaktiver Modus für Ansible/Automation
 
 ## Inhaltsverzeichnis
@@ -26,7 +25,6 @@ und Filebrowser-User** — sauber voneinander isoliert.
 - [Architektur](#architektur)
 - [Scripts](#scripts)
 - [Komplette Einrichtung — Schritt für Schritt](#komplette-einrichtung--schritt-für-schritt)
-- [MainWP Dashboard auf eigener VM (optional)](#mainwp-dashboard-auf-eigener-vm-optional)
 - [Was wird pro Site installiert](#was-wird-pro-site-installiert)
 - [Monitoring & Alerts](#monitoring--alerts)
 - [Backup](#backup)
@@ -39,18 +37,18 @@ und Filebrowser-User** — sauber voneinander isoliert.
 ## Architektur
 
 ```
-Internet → Cloudflare → Caddy (SSL + Authentik-OIDC für MainWP)
+Internet → Cloudflare → Caddy (SSL)
                                 ↓ HTTP intern
-        ┌──────────────────┬──────────────────┬──────────────────┐
-   Web-VM 1            Web-VM 2           MainWP-VM
- (WordPress)        (WooCommerce)       (Dashboard, Admin-only)
- Nginx + FastCGI    Nginx + FastCGI     Nginx (kein Cache)
- PHP 8.3-FPM 256M   PHP 8.3-FPM 512M    PHP 8.3-FPM 1536M
- Redis 256mb        Redis 512mb         Redis 1024mb
- phpMyAdmin :8080   phpMyAdmin :8080    phpMyAdmin :8080
- Filebrowser :8090  Filebrowser :8090   Filebrowser :8090
- Netdata :19999     Netdata :19999      Netdata :19999
-        └──────────────────┴──────────────────┴──────────────────┘
+        ┌──────────────────┬──────────────────┐
+   Web-VM 1            Web-VM 2
+ (WordPress)        (WooCommerce)
+ Nginx + FastCGI    Nginx + FastCGI
+ PHP 8.3-FPM 256M   PHP 8.3-FPM 512M
+ Redis 256mb        Redis 512mb
+ phpMyAdmin :8080   phpMyAdmin :8080
+ Filebrowser :8090  Filebrowser :8090
+ Netdata :19999     Netdata :19999
+        └──────────────────┴──────────────────┘
                                 ↓
                            Datenbank-VM (gemeinsam)
                               MariaDB
@@ -70,7 +68,7 @@ Internet → Cloudflare → Caddy (SSL + Authentik-OIDC für MainWP)
 | `install-wp.sh` | Web-VM | Neue WordPress- oder WooCommerce-Site anlegen | Pro neue Site |
 | `delete-wp.sh` | Web-VM | Site vollständig entfernen | Bei Bedarf |
 | `maintenance.sh` | Web-VM | Maintenance Mode ein-/ausschalten | Bei Bedarf |
-| `update-wp.sh` | Web-VM | Manuelles CLI-Update einzelner Sites (mit Pre-Update-Snapshots) — Updates laufen primär über MainWP | Fallback |
+| `update-wp.sh` | Web-VM | Manuelles CLI-Update einzelner Sites (mit Pre-Update-Snapshots) — Updates laufen manuell über dieses Script | Bei Bedarf |
 | `list-sites.sh` | Web-VM | Alle Sites mit Status anzeigen | Bei Bedarf |
 | `clone-site.sh` | Web-VM | Bestehende Site auf neue Domain klonen | Bei Bedarf |
 | `migrate-wp.sh` | Web-VM | Externe WordPress-Site importieren | Bei Bedarf |
@@ -135,7 +133,6 @@ bash proxmox-create-vm.sh   # WooCommerce-VM
 | Datenbank | 4 | 8 GB | 50 GB |
 | WordPress | 2 | 4 GB | 30 GB |
 | WooCommerce | 4 | 8 GB | 40 GB |
-| MainWP | 4 | 8 GB | 50 GB |
 
 ---
 
@@ -178,7 +175,7 @@ sudo bash install-wp.sh
 ```
 
 Fragt nach Domain und Typ (WordPress oder WooCommerce).
-Danach Endpunkt provisionieren (`provision-endpoint.sh` im privaten `homelab-provisioning`): legt den Caddy-Block `https://domain.de → http://<WEB-VM-IP>:80` an, Cloudflare-DNS, Cronicle-WP-Cron und Matomo.
+Danach Endpunkt provisionieren (`provision-endpoint.sh` im privaten `homelab-provisioning`): legt den Caddy-Block `https://domain.de → http://<WEB-VM-IP>:80` an, Cloudflare-DNS, cron-job.org-WP-Cron und Matomo.
 
 > **SEOpress Pro:** Lade die ZIP einmal nach `r2:wp-plugins/seopress-pro.zip` hoch (oder welcher Plugin-Bucket bei Setup angegeben wurde). Beim ersten `setup-web.sh`-Lauf wird sie automatisch nach `/etc/wp-hosting/plugins/` synchronisiert. Spätere Updates: ZIP in R2 ersetzen, dann `sudo bash sync-plugins.sh`.
 
@@ -205,92 +202,6 @@ sudo bash maintenance.sh
 
 ---
 
-## MainWP Dashboard auf eigener VM (optional)
-
-Für die zentrale Verwaltung aller Child-Sites lohnt sich eine eigene
-**MainWP-VM** als 4. Web-VM. Vorteile gegenüber Co-Hosting auf einer
-WordPress-VM:
-- **1536M PHP-Memory** für Sync mit vielen Child-Sites
-- **Reduzierter Plugin-Stack** (keine SEO/Cookie/Antispam-Plugins für eine reine Admin-Site)
-- **Eigene Auth-Schicht** via Caddy Forward-Auth zu Authentik (kein public-erreichbares wp-login)
-
-### Setup (kompakte Variante)
-
-```bash
-# 1) Proxmox Host — VM anlegen mit Option 4 (MainWP, 4/8/50)
-bash proxmox-create-vm.sh
-
-# 2) Auf der neuen VM — Web-Stack mit Option 3 (MainWP Dashboard)
-sudo bash setup-web.sh
-
-# 3) Dashboard-Site (genau eine — Single-Site-by-design)
-sudo bash install-wp.sh --domain mainwp.example.com --type mainwp --yes
-```
-
-### Plugin-ZIPs im wp-plugins-Bucket
-
-- `mainwp.zip` — wird auf der mainwp-VM auto-installiert
-- `mainwp-child.zip` — auf jeder normalen WP-/Woo-Site auto-installiert (Standard)
-
-Nach Upload neuer ZIP-Versionen: `sudo bash sync-plugins.sh --plugins`
-
-### Caddy Proxy-Host mit Authentik Forward-Auth
-
-In Caddy für die MainWP-Domain einen Proxy-Host anlegen:
-- Domain: `mainwp.example.com`
-- Forward zu: `http://<MainWP-VM-IP>:80`
-- SSL: Let's Encrypt aktivieren
-- **Advanced → Custom Nginx Configuration** (Snippet aus
-  [Authentik Outpost-Doku](https://goauthentik.io/docs/providers/proxy/server_nginx)):
-
-```nginx
-# Pass auth requests to Authentik Outpost
-location /outpost.goauthentik.io {
-    proxy_pass        http://<authentik-outpost-ip>:9000/outpost.goauthentik.io;
-    proxy_set_header  Host $host;
-    proxy_set_header  X-Original-URL $scheme://$http_host$request_uri;
-    add_header        Set-Cookie $auth_cookie;
-    auth_request_set  $auth_cookie $upstream_http_set_cookie;
-    proxy_pass_request_body off;
-    proxy_set_header  Content-Length "";
-}
-
-# Forward-Auth für alle Requests
-auth_request               /outpost.goauthentik.io/auth/nginx;
-error_page 401            = @goauthentik_proxy_signin;
-auth_request_set $auth_cookie $upstream_http_set_cookie;
-add_header Set-Cookie     $auth_cookie;
-auth_request_set $authentik_username $upstream_http_x_authentik_username;
-proxy_set_header X-authentik-username $authentik_username;
-
-location @goauthentik_proxy_signin {
-    internal;
-    add_header Set-Cookie $auth_cookie;
-    return 302 /outpost.goauthentik.io/start?rd=$scheme://$http_host$request_uri;
-}
-```
-
-In Authentik:
-1. **Proxy-Provider** für die MainWP-Domain anlegen (Forward-Auth Mode)
-2. Einer **Application** zuweisen
-3. Im **Outpost** veröffentlichen
-
-### Was läuft auf der mainwp-VM
-
-Reduzierter Plugin-Stack (5 Plugins, keine Front-End-Plugins):
-
-| Plugin | Zweck |
-|---|---|
-| MainWP Dashboard | Zentrale Verwaltung der Child-Sites |
-| Two Factor | 2FA — zusätzliche Schicht hinter Authentik |
-| Redis Object Cache | Performance |
-| FluentSMTP | E-Mail-Notifications |
-| Nginx Helper | (Purge deaktiviert — kein FastCGI-Cache auf mainwp-Vhost) |
-
-Kein Blocksy, kein WooCommerce, kein MainWP Child auf der Dashboard-Site selbst.
-
----
-
 ## Was wird pro Site installiert
 
 ### Infrastruktur
@@ -298,7 +209,7 @@ Kein Blocksy, kein WooCommerce, kein MainWP Child auf der Dashboard-Site selbst.
 - Eigener **PHP-FPM-Pool** (dynamic für WP, static für WooCommerce, Slow Log ab 5s)
 - Eigener **Nginx-Vhost** mit FastCGI-Cache und WebP-Serving
 - Eigene **MariaDB-Datenbank** + User mit 32-stelligem Passwort
-- **WP-Cron** extern via Cronicle (GET `wp-cron.php` alle 5 Min, angelegt durch `provision-endpoint.sh` im privaten `homelab-provisioning`) — lokal `DISABLE_WP_CRON=true`, kein System-Cron, kein Frontend-Overhead
+- **WP-Cron** extern via cron-job.org (GET `wp-cron.php` alle 5 Min, angelegt durch `provision-endpoint.sh` im privaten `homelab-provisioning`) — lokal `DISABLE_WP_CRON=true`, kein System-Cron, kein Frontend-Overhead
 - **SFTP-Zugang** (Chroot-Jail, Passwort-Auth, landet direkt im Site-Verzeichnis)
 - **Filebrowser-User** mit Scope auf das Site-Verzeichnis
 
@@ -330,7 +241,6 @@ Kein Blocksy, kein WooCommerce, kein MainWP Child auf der Dashboard-Site selbst.
 | SEOpress + SEOpress Pro | SEO (Pro-ZIP + Lizenz-Key aus Config) |
 | FAZ Cookie Manager | DSGVO-konformes Cookie Consent (GitHub) |
 | Fluent Forms + Pro | Formulare (Free-Basis aus Repo + Pro-ZIP `fluentformpro.zip` aus Bucket) |
-| MainWP Child | Remote-Verwaltung via zentralem MainWP Dashboard (mit auto-generierter Unique Security ID) |
 
 > **DB-Cleanup statt WP-Optimize:** Statt eines Plugins läuft `db-cleanup.sh` wöchentlich (So 05:00) per Cron über alle Sites — expired Transients, Papierkorb, Spam-Kommentare, Action-Scheduler-Cleanup (nur Woo-Shops), `wp db optimize`. Kein Frontend-Risiko, kein Cache-Konflikt.
 
@@ -427,8 +337,6 @@ r2:wp-plugins/                          ← private/Pro-Plugin-ZIPs
 ├── fluentformpro.zip                   ← Fluent Forms Pro (alle Sites)
 ├── funnelkit-automations-pro.zip       ← E-Mail-Marketing (Woo)
 ├── pixel-manager-pro.zip               ← alle Ad-Pixel + Server-Side CAPI (Woo)
-├── mainwp-child.zip                    ← MainWP Child (auf JEDER Site auto-installiert)
-├── mainwp.zip                ← MainWP Dashboard (nur auf mainwp-VM auto-installiert)
 ├── postxpro.zip                        ← Tech-Blog-Blocks
 ├── seopress-pro.zip
 ├── wowinvoice-pro.zip                  ← PDF-Rechnungen (Woo, Premium-only)
@@ -451,25 +359,23 @@ beim Setup automatisch heruntergeladen:
 
 **Welche Plugins/Themes werden pro Site-Typ aktiviert:**
 
-| Plugin/Theme | Blog (wordpress) | Shop (woocommerce) | MainWP-Dashboard (mainwp) |
-|---|:---:|:---:|:---:|
-| Blocksy + Child Theme | ✓ | ✓ | — |
-| Blocksy Companion Pro | ✓ | ✓ | — |
-| SEOpress Pro | ✓ | ✓ | — |
-| Redis Object Cache, FluentSMTP, Two Factor, Nginx Helper | ✓ | ✓ | ✓ |
-| WebP Converter, Antispam Bee, Turnstile, FAZ Cookie Manager | ✓ | ✓ | — |
-| Fluent Forms + Pro (Formulare) | ✓ | ✓ | — |
-| **MainWP Child** (Remote-Verwaltung, Unique Security ID) | ✓ | ✓ | — |
-| **MainWP Dashboard** (zentrale Verwaltung) | — | — | ✓ |
-| **PostX Pro** (Reviews, Comparison, Query Loops) | ✓ | — | — |
-| **WowStore Pro** (Shop-Erweiterung) | — | ✓ | — |
-| **WowRevenue Pro** (On-Site-Funnels) | — | ✓ | — |
-| **WowInvoice** (PDF-Rechnungen, Premium-only) | — | ✓ | — |
-| **FunnelKit Automations** (E-Mail-Marketing) | — | ✓ | — |
-| **Payment Gateways** (Mollie, PayPal, Stripe, Amazon Pay) | — | ✓ | — |
-| **Product Feed Manager** (Free, alle Feeds: Google/Meta/TikTok/Pinterest/Bing/Idealo) | — | ✓ | — |
-| **Pixel Manager** (Free + Pro-ZIP, alle Ad-Pixel + CAPI, ersetzt GTM) | — | ✓ | — |
-| WooCommerce | — | ✓ | — |
+| Plugin/Theme | Blog (wordpress) | Shop (woocommerce) |
+|---|:---:|:---:|
+| Blocksy + Child Theme | ✓ | ✓ |
+| Blocksy Companion Pro | ✓ | ✓ |
+| SEOpress Pro | ✓ | ✓ |
+| Redis Object Cache, FluentSMTP, Two Factor, Nginx Helper | ✓ | ✓ |
+| WebP Converter, Antispam Bee, Turnstile, FAZ Cookie Manager | ✓ | ✓ |
+| Fluent Forms + Pro (Formulare) | ✓ | ✓ |
+| **PostX Pro** (Reviews, Comparison, Query Loops) | ✓ | — |
+| **WowStore Pro** (Shop-Erweiterung) | — | ✓ |
+| **WowRevenue Pro** (On-Site-Funnels) | — | ✓ |
+| **WowInvoice** (PDF-Rechnungen, Premium-only) | — | ✓ |
+| **FunnelKit Automations** (E-Mail-Marketing) | — | ✓ |
+| **Payment Gateways** (Mollie, PayPal, Stripe, Amazon Pay) | — | ✓ |
+| **Product Feed Manager** (Free, alle Feeds: Google/Meta/TikTok/Pinterest/Bing/Idealo) | — | ✓ |
+| **Pixel Manager** (Free + Pro-ZIP, alle Ad-Pixel + CAPI, ersetzt GTM) | — | ✓ |
+| WooCommerce | — | ✓ |
 
 **Plugin-/Theme-Updates:** Nach Upload einer neuen ZIP-Version in den jeweiligen Bucket:
 ```bash
@@ -529,8 +435,8 @@ sudo bash maintenance.sh
 - Besucher sehen eine "Coming Soon"-Platzhalterseite (HTTP 200, dunkles Design,
   kein WordPress-Branding) statt der unfertigen Installation — inkl. Matomo-Tracking,
   sobald die Site-ID gesetzt ist
-- admin-ajax.php, wp-login.php und die MainWP-REST-API bleiben immer erreichbar
-  (MainWP-Connect und Uptime-Monitor funktionieren daher schon vor dem echten Go-Live)
+- wp-login.php bleibt immer erreichbar; der Uptime-Monitor sieht HTTP 200 schon
+  vor dem echten Go-Live
 - Admins können sich einloggen und normal arbeiten
 - Neue Sites starten automatisch im Maintenance Mode
 

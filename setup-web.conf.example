@@ -8,7 +8,7 @@
 # Sonderzeichen (z.B. SSH_PUB_KEY, SLACK_WEBHOOK_URL mit Slashes) MÜSSEN in doppelte
 # Anführungszeichen: VAR="wert mit leerzeichen".
 
-# ── VM-Typ (Pflicht): wordpress | woocommerce | mainwp ──
+# ── VM-Typ (Pflicht): wordpress | woocommerce ──
 VM_TYPE=woocommerce
 
 # ── Datenbank-VM (Pflicht) ──

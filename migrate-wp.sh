@@ -385,9 +385,9 @@ ln -sf "/etc/nginx/sites-available/${DOMAIN}" "/etc/nginx/sites-enabled/${DOMAIN
 
 # ── WP-Cron ───────────────────────────────────────────────────────────────
 # Kein lokaler System-Cron (konsistent mit install-wp): DISABLE_WP_CRON bleibt gesetzt,
-# der WP-Cron wird zentral über provision-endpoint.sh in Cronicle angelegt. Für die
-# migrierte Domain muss der Cronicle-Event separat angelegt werden.
-info "WP-Cron: kein lokaler Cron — zentral via Cronicle (provision-endpoint.sh) für ${DOMAIN} anlegen"
+# der WP-Cron wird zentral über provision-endpoint.sh in cron-job.org angelegt. Für die
+# migrierte Domain muss der Job separat angelegt werden.
+info "WP-Cron: kein lokaler Cron — zentral via cron-job.org (provision-endpoint.sh) für ${DOMAIN} anlegen"
 
 # ── Services neu laden ────────────────────────────────────────────────────
 nginx -t && systemctl restart nginx   # restart: www-data übernimmt die neue Site-Gruppe

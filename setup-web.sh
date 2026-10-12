@@ -68,24 +68,22 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 
 # ── VM-Typ ─────────────────────────────────────────────────────────────────
-# Config-Modus: VM_TYPE direkt (wordpress|woocommerce|mainwp) setzen.
+# Config-Modus: VM_TYPE direkt (wordpress|woocommerce) setzen.
 if [[ -z "${VM_TYPE:-}" ]]; then
     echo "Welche Art von Web-VM wird eingerichtet?"
     echo "  1) WordPress (Standard)"
     echo "  2) WooCommerce (Performance-optimiert)"
-    echo "  3) MainWP Dashboard (Admin-only, viel RAM, kein public Frontend)"
     echo ""
-    read -rp "Auswahl [1/2/3]: " vm_choice
+    read -rp "Auswahl [1/2]: " vm_choice
     case "$vm_choice" in
         1) VM_TYPE="wordpress" ;;
         2) VM_TYPE="woocommerce" ;;
-        3) VM_TYPE="mainwp" ;;
         *) err "Ungültige Auswahl." ;;
     esac
 fi
 case "$VM_TYPE" in
-    wordpress|woocommerce|mainwp) ;;
-    *) err "Ungültiger VM_TYPE: ${VM_TYPE} (erlaubt: wordpress, woocommerce, mainwp)" ;;
+    wordpress|woocommerce) ;;
+    *) err "Ungültiger VM_TYPE: ${VM_TYPE} (erlaubt: wordpress, woocommerce)" ;;
 esac
 
 # ── Konfiguration abfragen (interaktiv oder aus --config) ──────────────────
@@ -431,11 +429,6 @@ case "$VM_TYPE" in
         MEM_LIMIT="512M"; UPLOAD_SIZE="128M"; MAX_EXEC="300"
         MAX_INPUT_VARS="10000"; OPCACHE_MEM="256"; OPCACHE_FILES="20000"
         ;;
-    mainwp)
-        # MainWP Dashboard: hoher RAM-Bedarf für viele verwaltete Sites + lange Sync-Operationen
-        MEM_LIMIT="1536M"; UPLOAD_SIZE="128M"; MAX_EXEC="600"
-        MAX_INPUT_VARS="10000"; OPCACHE_MEM="256"; OPCACHE_FILES="20000"
-        ;;
     *)  # wordpress
         MEM_LIMIT="256M"; UPLOAD_SIZE="64M"; MAX_EXEC="60"
         MAX_INPUT_VARS="5000"; OPCACHE_MEM="128"; OPCACHE_FILES="10000"
@@ -469,7 +462,6 @@ log "PHP 8.3 konfiguriert (${MEM_LIMIT} RAM, OPcache ${OPCACHE_MEM}MB)"
 # ── Redis konfigurieren ───────────────────────────────────────────────────
 case "$VM_TYPE" in
     woocommerce) REDIS_MEM="512mb" ;;
-    mainwp)      REDIS_MEM="1024mb" ;;
     *)           REDIS_MEM="256mb" ;;
 esac
 
@@ -990,13 +982,11 @@ else
     warn "Datenbankverbindung fehlgeschlagen — bitte nach dem Setup prüfen"
 fi
 
-# ── WordPress-Updates: zentral via MainWP (kein Auto-Update-Cron) ────────────────────────────────────────
-# Bewusst KEIN unbeaufsichtigter Auto-Update-Cron. Updates werden kontrolliert
-# über das zentrale MainWP-Dashboard ausgerollt (Update-Vorschau, gestaffelt,
-# Rollback) — verhindert, dass ein fehlerhaftes Update viele Shops gleichzeitig
-# zerlegt. MainWP-„Backup vor Update" zusätzlich aktivieren. Für manuelle
-# CLI-Updates einzelner Sites steht update-wp.sh bereit (inkl. Pre-Update-Snapshots).
-log "WordPress-Updates laufen zentral über MainWP (kein Auto-Update-Cron)"
+# ── WordPress-Updates: manuell via update-wp.sh (kein Auto-Update-Cron) ───────────────────────────
+# Bewusst KEIN unbeaufsichtigter Auto-Update-Cron — ein fehlerhaftes Update soll nicht
+# viele Sites gleichzeitig zerlegen. Updates laufen kontrolliert per update-wp.sh
+# (inkl. Pre-Update-Snapshots).
+log "WordPress-Updates laufen manuell über update-wp.sh (kein Auto-Update-Cron)"
 
 # ── OPcache-Status PHP-Endpoint ───────────────────────────────────────────
 mkdir -p /var/lib/wp-hosting

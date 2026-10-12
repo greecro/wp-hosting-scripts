@@ -107,35 +107,20 @@ if [[ -n "$CLI_TYPE" ]]; then
     case "$CLI_TYPE" in
         wp|wordpress)         SITE_TYPE="wordpress" ;;
         woo|woocommerce|wc)   SITE_TYPE="woocommerce" ;;
-        mainwp|main|mwp)      SITE_TYPE="mainwp" ;;
-        *) err "Ungültiger --type: ${CLI_TYPE} (erlaubt: wordpress, woocommerce, mainwp)" ;;
+        *) err "Ungültiger --type: ${CLI_TYPE} (erlaubt: wordpress, woocommerce)" ;;
     esac
 else
     echo ""
     echo "Welche Installation?"
     echo "  1) WordPress"
     echo "  2) WooCommerce"
-    echo "  3) MainWP Dashboard"
     echo ""
-    read -rp "Auswahl [1/2/3]: " site_choice
+    read -rp "Auswahl [1/2]: " site_choice
     case "$site_choice" in
         1) SITE_TYPE="wordpress" ;;
         2) SITE_TYPE="woocommerce" ;;
-        3) SITE_TYPE="mainwp" ;;
         *) err "Ungültige Auswahl." ;;
     esac
-fi
-
-# ── Sanity Check für MainWP-Type ──────────────────────────────────────────
-if [[ "$SITE_TYPE" == "mainwp" ]]; then
-    if [[ "${VM_TYPE:-}" != "mainwp" ]]; then
-        err "Diese VM ist nicht als MainWP-VM eingerichtet (VM_TYPE=${VM_TYPE:-unbekannt}). Erst setup-web.sh mit Option 3 (MainWP Dashboard) ausführen."
-    fi
-    # || true: leeres Glob → ls exit 2 → bräche unter set -o pipefail + set -e ab (nur wc-Zahl zählt)
-    EXISTING_SITES=$(ls -1 /etc/wp-hosting/sites/*.txt 2>/dev/null | wc -l) || true
-    if [[ ${EXISTING_SITES} -gt 0 ]]; then
-        err "MainWP-VM ist Single-Site-by-design — es existiert bereits eine Site."
-    fi
 fi
 
 # ── Sanity Check für WooCommerce-Type ─────────────────────────────────────
@@ -356,45 +341,7 @@ log "Verzeichnis: ${SITE_PATH}"
 TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 TOTAL_RAM_MB=$((TOTAL_RAM_KB / 1024))
 
-if [[ "$SITE_TYPE" == "mainwp" ]]; then
-    # MainWP Dashboard: ondemand — Admin-Last ist bursty, keine permanenten Worker
-    MAX_CHILDREN=10
-    cat > "$PHP_POOL" <<EOF
-[${DOMAIN}]
-user  = ${SYSTEM_USER}
-group = ${SYSTEM_USER}
-
-listen = /run/php/php8.3-fpm-${DOMAIN}.sock
-listen.owner = www-data
-listen.group = www-data
-listen.mode  = 0660
-
-; ondemand: keine Worker im Idle — Admin-Site ohne dauerhaften Traffic
-pm                      = ondemand
-pm.max_children         = ${MAX_CHILDREN}
-pm.process_idle_timeout = 30s
-pm.max_requests         = 500
-
-pm.status_path          = /fpm-status
-ping.path               = /fpm-ping
-ping.response           = pong
-
-php_admin_value[memory_limit]         = 1536M
-php_admin_value[upload_max_filesize]  = 128M
-php_admin_value[post_max_size]        = 128M
-php_admin_value[max_execution_time]   = 600
-php_admin_value[max_input_time]       = 600
-php_admin_value[max_input_vars]       = 10000
-; cURL/Socket-Timeout hoch: MainWP-Child-Sync macht lange Requests; MainWP-Systemcheck
-; warnt sonst "Low cURL timeout" (Default 60s, Empfehlung >= 300s).
-php_admin_value[default_socket_timeout] = 300
-php_admin_value[error_log]            = /var/log/php/${DOMAIN}.error.log
-php_admin_flag[log_errors]            = on
-
-slowlog                               = /var/log/php/${DOMAIN}.slow.log
-request_slowlog_timeout               = 10s
-EOF
-elif [[ "$SITE_TYPE" == "woocommerce" ]]; then
+if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     # WooCommerce: static process manager für konstante Performance
     WORKER_MEM=120
     MAX_CHILDREN=$((TOTAL_RAM_MB / 4 / WORKER_MEM))
@@ -561,91 +508,6 @@ server {
     }
 
     # PHP-FPM Pool-Status (Basic-Auth, gleiches Passwort wie phpMyAdmin)
-    location = /fpm-status {
-        auth_basic           "Restricted";
-        auth_basic_user_file /etc/nginx/.pma_htpasswd;
-        fastcgi_pass         unix:${SOCK};
-        fastcgi_param        SCRIPT_FILENAME \$fastcgi_script_name;
-        include              fastcgi_params;
-    }
-    location = /fpm-ping {
-        access_log           off;
-        fastcgi_pass         unix:${SOCK};
-        fastcgi_param        SCRIPT_FILENAME \$fastcgi_script_name;
-        include              fastcgi_params;
-    }
-
-$(if [[ -n "$ADMIN_IP" ]]; then
-cat <<IPEOF
-    location /wp-admin/ {
-        allow ${ADMIN_IP};
-        deny all;
-    }
-    location = /wp-login.php {
-        allow ${ADMIN_IP};
-        deny all;
-        limit_req zone=login burst=3 nodelay;
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:${SOCK};
-        include fastcgi_params;
-    }
-IPEOF
-else
-cat <<NOIPEOF
-    location = /wp-login.php { limit_req zone=login burst=3 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:${SOCK}; include fastcgi_params; }
-NOIPEOF
-fi)
-}
-EOF
-elif [[ "$SITE_TYPE" == "mainwp" ]]; then
-    # MainWP Dashboard: Admin-only — kein FastCGI-Cache, lange Timeouts für Child-Sync
-    cat > "$NGINX_VHOST" <<EOF
-server {
-    listen 80;
-    server_name ${DOMAIN};
-    root ${SITE_PATH};
-    index index.php;
-
-    access_log /var/log/nginx/${DOMAIN}.access.log main;
-    error_log  /var/log/nginx/${DOMAIN}.error.log warn;
-
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-Content-Type-Options "nosniff";
-    add_header X-XSS-Protection "1; mode=block";
-
-    # Großzügige Limits für MainWP-Sync mit vielen Child-Sites
-    client_max_body_size 128M;
-    fastcgi_read_timeout 600s;
-    fastcgi_send_timeout 600s;
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
-
-    location ~ \.php\$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:${SOCK};
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-        fastcgi_read_timeout 600s;
-    }
-
-    location ~ /\.(ht|git|env)            { deny all; }
-    location ~ /(wp-config\.php|readme\.html|license\.txt|wp-config-sample\.php)\$ { deny all; }
-    location ~* /(?:uploads|files)/.*\.php\$ { deny all; }
-    location = /xmlrpc.php                 { deny all; }
-
-    # OPcache-Status (Basic-Auth)
-    location = /opcache-status {
-        auth_basic           "Restricted";
-        auth_basic_user_file /etc/nginx/.pma_htpasswd;
-        include              snippets/fastcgi-php.conf;
-        fastcgi_pass         unix:${SOCK};
-        fastcgi_param        SCRIPT_FILENAME /var/lib/wp-hosting/opcache-status.php;
-        include              fastcgi_params;
-    }
-
-    # FPM-Pool-Status
     location = /fpm-status {
         auth_basic           "Restricted";
         auth_basic_user_file /etc/nginx/.pma_htpasswd;
@@ -892,56 +754,6 @@ sudo -u "$SYSTEM_USER" wp option update large_size_h     "0"    --path="$SITE_PA
 
 log "Einstellungen gesetzt (Timezone: Europe/Berlin, Sprache: English, Permalinks: /%category%/%postname%/)"
 
-if [[ "$SITE_TYPE" == "mainwp" ]]; then
-    # ══════════════════════════════════════════════════════════════════════════
-    # MainWP Dashboard — reduzierter Plugin-Stack, kein Front-End-Theme
-    # ══════════════════════════════════════════════════════════════════════════
-    PLUGINS_DIR="/etc/wp-hosting/plugins"
-
-    # Redis Object Cache
-    sudo -u "$SYSTEM_USER" wp plugin install redis-cache --activate --path="$SITE_PATH" --allow-root || warn "Install-Schritt fehlgeschlagen, uebersprungen"
-    sudo -u "$SYSTEM_USER" wp redis enable --path="$SITE_PATH" --allow-root 2>/dev/null || true
-    log "Redis Object Cache aktiviert"
-
-    # FluentSMTP — für MainWP-Notifications
-    sudo -u "$SYSTEM_USER" wp plugin install fluent-smtp --activate --path="$SITE_PATH" --allow-root || warn "Install-Schritt fehlgeschlagen, uebersprungen"
-    log "FluentSMTP installiert"
-
-    # Two Factor — zusätzlich zur Authentik-Schicht
-    sudo -u "$SYSTEM_USER" wp plugin install two-factor --activate --path="$SITE_PATH" --allow-root || warn "Install-Schritt fehlgeschlagen, uebersprungen"
-    log "Two Factor installiert (→ Profil → Two Factor Options → QR-Code scannen)"
-
-    # Nginx Helper — Purge deaktiviert (kein FastCGI-Cache auf mainwp-Vhost)
-    sudo -u "$SYSTEM_USER" wp plugin install nginx-helper --activate --path="$SITE_PATH" --allow-root || warn "Install-Schritt fehlgeschlagen, uebersprungen"
-    sudo -u "$SYSTEM_USER" wp option update rt_wp_nginx_helper_options \
-        '{"enable_purge":"0"}' \
-        --format=json --path="$SITE_PATH" --allow-root 2>/dev/null || true
-    log "Nginx Helper installiert (Purge deaktiviert — kein FastCGI-Cache)"
-
-    # MainWP Dashboard Plugin aus wp-plugins-Bucket
-    if [[ -f "${PLUGINS_DIR}/mainwp.zip" ]]; then
-        install_local_zip "${PLUGINS_DIR}/mainwp.zip" "MainWP Dashboard"
-        log "MainWP Dashboard installiert"
-
-        # MainWP hängt Auto-Sync/Update-Check standardmäßig NICHT in WP-Cron ein
-        # (Default mainwp_wp_cron=0) — ohne WP-Cron-Kopplung liefe die eigene
-        # Sync-Engine nur noch mit, wenn jemand zufällig das Dashboard im Browser
-        # öffnet (Loopback-on-Pageview). In Kombination mit unserem generellen
-        # DISABLE_WP_CRON=true (kein lokaler Cron, externer Trigger via Cronicle)
-        # bleibt sie sonst komplett still — real 2026-09-15 auf dash.janzin-holding.com
-        # gefunden: Sync-Timestamps 27 Tage eingefroren, erst durch manuellen
-        # Dashboard-Besuch wieder in Gang. Fix: MainWP an unseren ohnehin
-        # verifiziert zuverlässigen Cronicle→wp-cron.php-Trigger koppeln.
-        sudo -u "$SYSTEM_USER" wp option update mainwp_wp_cron 1 --path="$SITE_PATH" --allow-root \
-            && log "MainWP: eigene Cron-Jobs an WP-Cron gekoppelt (mainwp_wp_cron=1)" \
-            || warn "mainwp_wp_cron konnte nicht gesetzt werden — nach Install manuell prüfen"
-    else
-        warn "MainWP Dashboard ZIP fehlt: ${PLUGINS_DIR}/mainwp.zip — sync-plugins.sh ausführen"
-    fi
-
-    # Dashboard verwaltet sich nicht selbst als Child — MAINWP_SECURITY_ID bleibt leer
-    MAINWP_SECURITY_ID=""
-else
 # ── Theme: Blocksy + Child ────────────────────────────────────────────────
 # Blocksy als Standard-Theme (FSE-fähig, performant). Child wird aktiviert,
 # damit Anpassungen Updates des Parent-Themes überleben.
@@ -1260,23 +1072,6 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     fi
 fi
 
-# ── MainWP Child (Remote-Verwaltung via zentralem MainWP Dashboard) ───────
-# Nur wordpress/woocommerce (dieser else-Zweig) — NICHT auf der mainwp-Dashboard-VM.
-# Security ID schützt vor Hijack durch fremde Dashboards.
-MAINWP_SECURITY_ID=""
-# Child aus lokalem Zip (Plugin-Bucket) bevorzugen, sonst aus dem wp.org-Repo — immer installieren.
-if [[ -f "${PLUGINS_DIR}/mainwp-child.zip" ]]; then
-    install_local_zip "${PLUGINS_DIR}/mainwp-child.zip" "MainWP Child"
-else
-    sudo -u "$SYSTEM_USER" wp plugin install mainwp-child --activate --path="$SITE_PATH" --allow-root || warn "Install-Schritt fehlgeschlagen, uebersprungen"
-fi
-
-# 16 Hex-Zeichen als Unique Security ID — wird beim Connect im Dashboard verlangt
-MAINWP_SECURITY_ID=$(openssl rand -hex 8)
-sudo -u "$SYSTEM_USER" wp option update mainwp_child_uniqueId "$MAINWP_SECURITY_ID" \
-    --path="$SITE_PATH" --allow-root
-log "MainWP Child installiert (Security ID: ${MAINWP_SECURITY_ID})"
-fi  # ── Ende: Standard-Stack (wordpress/woocommerce) vs. mainwp-Branch ──
 
 # ── Bloat entfernen ───────────────────────────────────────────────────────
 # Überflüssige Plugins
@@ -1622,16 +1417,14 @@ cat > "${SITE_PATH}/wp-content/mu-plugins/maintenance-mode.php" <<'MUPLUGIN'
  * Aktivieren:   touch wp-content/.maintenance-active
  * Deaktivieren: rm wp-content/.maintenance-active
  *
- * Liefert bewusst HTTP 200 (nicht 503): (a) admin-ajax.php lief bei 503 nicht,
- * damit scheiterte der MainWP-Connect-Handshake vor Go-Live; (b) dajaup/66uptime
- * werten 503 als "down"; (c) FastCGI-Cache cacht nur 200er (siehe maintenance.sh),
+ * Liefert bewusst HTTP 200 (nicht 503): (a) dajaup/66uptime werten 503 als "down";
+ * (b) FastCGI-Cache cacht nur 200er (siehe maintenance.sh),
  * 503 blieb also ungecacht und war deshalb hier unproblematisch — das gilt jetzt
  * andersrum: maintenance.sh purged den Cache bereits bei JEDEM Wechsel (live wie
  * maintenance), das deckt auch diesen 200er ab.
  *
  * Eingeloggte User (Admin) sehen die Seite immer normal.
- * wp-login.php, admin-ajax.php und die MainWP-REST-API (/wp-json/mainwp/) sind
- * immer erreichbar.
+ * wp-login.php ist immer erreichbar.
  */
 
 // CLI und Cron nie blockieren — sonst sind wp-cli-Wartungsskripte (update-wp,
@@ -1651,19 +1444,6 @@ $_wph_uri = $_SERVER['REQUEST_URI'] ?? '';
 
 // wp-login.php immer durchlassen
 if ( strpos( $_wph_uri, 'wp-login.php' ) !== false ) {
-    return;
-}
-
-// admin-ajax.php immer durchlassen: MainWP-Connect (Dashboard → Child-Site) laeuft
-// darueber und muss auch vor dem eigentlichen Content-Go-Live funktionieren.
-if ( strpos( $_wph_uri, 'admin-ajax.php' ) !== false ) {
-    return;
-}
-
-// MainWP-REST-API immer durchlassen: Dashboard-Fernsteuerung und Child-Anbindung
-// laufen per Consumer-Key-Auth und muessen auch im Wartungsmodus antworten. Nur die
-// mainwp-VM registriert /wp-json/mainwp/-Routen; auf Child-Sites 404 (harmlos).
-if ( strpos( $_wph_uri, '/wp-json/mainwp/' ) !== false ) {
     return;
 }
 
@@ -1752,9 +1532,9 @@ log "Must-Use Plugin: Maintenance Mode erstellt"
 # ── WP-Cron ────────────────────────────────────────────────────────────────
 # DISABLE_WP_CRON=true (wp-config) → kein Cron bei jedem Seitenaufruf.
 # KEIN lokaler System-Cron mehr: der WP-Cron wird zentral über provision-endpoint.sh
-# in Cronicle angelegt (Variante A, HTTP-GET auf wp-cron.php), direkt nach diesem
-# Install ausgelöst. So kann es keinen doppelten Cron (lokal + Cronicle) geben.
-log "WP-Cron: wird zentral in Cronicle angelegt (provision-endpoint.sh) — kein lokaler Cron"
+# in cron-job.org angelegt (HTTP-GET auf wp-cron.php), direkt nach diesem Install
+# ausgelöst. So kann es keinen doppelten Cron (lokal + extern) geben.
+log "WP-Cron: wird zentral in cron-job.org angelegt (provision-endpoint.sh) — kein lokaler Cron"
 
 # ── Berechtigungen setzen ─────────────────────────────────────────────────
 chown -R "${SYSTEM_USER}:${SYSTEM_USER}" "$SITE_PATH"
@@ -1898,24 +1678,6 @@ System-User:   ${SYSTEM_USER}
 Admin-IP:      ${ADMIN_IP:-unbeschränkt}
 EOF
 
-# MainWP-Sektion: Child (Slave-Sites) oder Dashboard (mainwp-VM)
-if [[ -n "$MAINWP_SECURITY_ID" ]]; then
-    cat >> "$CRED_FILE" <<EOF
-
-── MainWP Child ──────────────────────────────
-Security ID:   ${MAINWP_SECURITY_ID}
-Hinweis:       Im MainWP Dashboard "Add Site" → URL + Admin-Login + Security ID eingeben
-EOF
-elif [[ "$SITE_TYPE" == "mainwp" ]]; then
-    cat >> "$CRED_FILE" <<EOF
-
-── MainWP Dashboard ──────────────────────────
-Plugin:        MainWP Dashboard (zentrale Verwaltung)
-Dashboard URL: https://${DOMAIN}/wp-admin/admin.php?page=mainwp_tab
-Auth-Layer:    Authentik Forward-Auth via Caddy (siehe homelab-caddy)
-EOF
-fi
-
 chmod 600 "$CRED_FILE"
 _INSTALL_DONE=true  # Cleanup-Trap deaktivieren
 
@@ -1945,15 +1707,6 @@ echo -e "${YELLOW}  → Passwörter stehen NUR in ${CRED_FILE} (chmod 600) — n
 echo -e "${YELLOW}     Auslesen: sudo cat ${CRED_FILE}${NC}"
 echo -e "${YELLOW}  → Site ist im Maintenance Mode — freischalten: sudo bash maintenance.sh${NC}"
 echo -e "${YELLOW}  → Endpunkt via provision-endpoint.sh einrichten (Caddy-Block + DNS + Cron + Matomo).${NC}"
-if [[ -n "$MAINWP_SECURITY_ID" ]]; then
-# ID unformatiert lassen: Werkzeuge (deploy-site.sh) greifen sie per grep aus dem Log,
-# dazwischenliegende ANSI-Codes würden das Muster brechen.
-echo -e "${YELLOW}  → MainWP: im Dashboard 'Add Site' → URL + Admin-Login + Unique Security ID${NC}"
-echo "     Security ID: ${MAINWP_SECURITY_ID}"
-elif [[ "$SITE_TYPE" == "mainwp" ]]; then
-echo -e "${YELLOW}  → MainWP Dashboard: ${BOLD}https://${DOMAIN}/wp-admin/admin.php?page=mainwp_tab${NC}"
-echo -e "${YELLOW}     Caddy-Block mit Authentik-Forward-Auth einrichten (siehe homelab-caddy).${NC}"
-fi
 if [[ "$SITE_TYPE" == "woocommerce" ]]; then
 echo -e "${YELLOW}  → Rechtliche Texte befüllen (Impressum, Datenschutz, AGB, Widerruf):${NC}"
 echo -e "${YELLOW}     Empfehlung: https://www.it-recht-kanzlei.de (Digital-Paket)${NC}"
