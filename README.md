@@ -83,6 +83,7 @@ Internet → Cloudflare → Caddy (SSL)
 | `sync-plugins.sh` | Web-VM | Private Plugin-ZIPs (SEOpress Pro etc.) aus Plugin-Bucket nachladen | Bei Plugin-Update |
 | `db-backup.sh` | Datenbank-VM | Manueller MariaDB-Dump (Encryption + Remote-Mirror wie Auto-Cron, flock-protected) | Bei Bedarf |
 | `db-cleanup.sh` | Web-VM | DB-Cleanup aller Sites: Transients, Papierkorb, Spam, Action Scheduler, OPTIMIZE TABLE | Wöchentlich (Cron So 05:00) |
+| `setup-dashy-access.sh` | Web-VM | Zugang für ein Management-Dashboard: User `dashy`, restriktiver Key, ForceCommand-Gate (`dashy-gate`), Read-only-wp-cli-Wrapper (`dashy-wp`) und Site-Registry als JSON (`dashy-sites`); wird von `setup-web.sh` aufgerufen, wenn `DASHY_PUB_KEY`/`DASHY_FROM` gesetzt sind | Einmalig pro VM |
 | `check-dns.sh` | beliebig | DNS-/Mail-Readiness prüfen (A, www, SPF, DMARC, SES-DKIM) — eine oder mehrere Domains | Vor Anlage |
 
 ---

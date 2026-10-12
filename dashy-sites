@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# dashy-sites — Site-Registry für das Management-Dashboard "Dashy".
+#
+# Aufruf (über sudoers, als root):   sudo -n /usr/local/sbin/dashy-sites
+# Keine Argumente. Liest /etc/wp-hosting/sites/*.txt (600 root, enthalten Passwörter)
+# und gibt ein JSON-Array mit AUSSCHLIESSLICH diesen Feldern aus:
+#   domain, type, installed, site_path, system_user, php_pool, db_host, db_name,
+#   host (VM-Hostname), exists (Site-Pfad vorhanden)
+# Die Labels werden per Allowlist gegriffen — Passwort-Zeilen werden nie angefasst.
+set -euo pipefail
+
+[[ $# -eq 0 ]] || { echo "dashy-sites: keine Argumente erlaubt" >&2; exit 2; }
+[[ $EUID -eq 0 ]] || { echo "dashy-sites: muss als root laufen (sudo -n)" >&2; exit 2; }
+
+SITES_DIR="/etc/wp-hosting/sites"
+HOST=$(hostname)
+T0="${EPOCHREALTIME:-0.0}"; T0="${T0/./}"
+
+json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\t'/\\t}"; printf '%s' "$s"; }
+
+# field <datei> <label>  → Wert hinter "Label:   " (nur erlaubte Labels)
+field() {
+    local file="$1" label="$2"
+    case "$label" in
+        Domain|Typ|Installiert|System-User|Site-Pfad|PHP-Pool|DB-Host|DB-Name) ;;
+        *) echo "dashy-sites: label ${label} nicht erlaubt" >&2; exit 3 ;;
+    esac
+    awk -v l="$label" 'index($0, l ":") == 1 { sub("^" l ":[ \t]*", ""); print; exit }' "$file"
+}
+
+count=0
+printf '['
+shopt -s nullglob
+for f in "$SITES_DIR"/*.txt; do
+    domain=$(field "$f" Domain); domain="${domain#https://}"; domain="${domain#http://}"; domain="${domain%/}"
+    [[ -n "$domain" ]] || domain="${f##*/}"; domain="${domain%.txt}"
+    site_path=$(field "$f" Site-Pfad)
+    [[ -n "$site_path" ]] || site_path="/var/www/${domain}"
+    exists=false; [[ -d "$site_path" ]] && exists=true
+    (( count > 0 )) && printf ','
+    printf '{"domain":"%s","type":"%s","installed":"%s","site_path":"%s","system_user":"%s","php_pool":"%s","db_host":"%s","db_name":"%s","host":"%s","exists":%s}' \
+        "$(json_escape "$domain")" \
+        "$(json_escape "$(field "$f" Typ)")" \
+        "$(json_escape "$(field "$f" Installiert)")" \
+        "$(json_escape "$site_path")" \
+        "$(json_escape "$(field "$f" System-User)")" \
+        "$(json_escape "$(field "$f" PHP-Pool)")" \
+        "$(json_escape "$(field "$f" DB-Host)")" \
+        "$(json_escape "$(field "$f" DB-Name)")" \
+        "$(json_escape "$HOST")" \
+        "$exists"
+    count=$((count+1))
+done
+printf ']\n'
+
+T1="${EPOCHREALTIME:-0.0}"; T1="${T1/./}"
+logger -t dashy -p auth.info -- "site=* caller=${SUDO_USER:-?} runas=root exit=0 ms=$(( (10#${T1} - 10#${T0}) / 1000 )) reason=ok cmd=dashy-sites sites=${count}" 2>/dev/null || true

@@ -917,6 +917,23 @@ else
     warn "sshd-Config-Test (sshd -t) fehlgeschlagen — SSH NICHT neu gestartet."
 fi
 
+# ── Dashy-Zugang (optional, nur per Conf: DASHY_PUB_KEY + DASHY_FROM) ──────
+# Eigener User "dashy" mit restriktivem Key, Read-only-wp-cli-Wrapper und
+# Site-Registry — Details in setup-dashy-access.sh (einzeln nachrüstbar).
+DASHY_PUB_KEY="${DASHY_PUB_KEY:-}"; DASHY_FROM="${DASHY_FROM:-}"
+if [[ -n "$DASHY_PUB_KEY" && -n "$DASHY_FROM" ]]; then
+    if [[ -f "$(dirname "$0")/setup-dashy-access.sh" ]]; then
+        bash "$(dirname "$0")/setup-dashy-access.sh" --pubkey "$DASHY_PUB_KEY" --from "$DASHY_FROM" \
+            || warn "setup-dashy-access.sh fehlgeschlagen — Dashy-Zugang manuell nachziehen"
+    else
+        warn "setup-dashy-access.sh fehlt neben setup-web.sh — Dashy-Zugang übersprungen"
+    fi
+elif [[ -n "${DASHY_PUB_KEY}${DASHY_FROM}" ]]; then
+    warn "DASHY_PUB_KEY und DASHY_FROM nur gemeinsam setzen — Dashy-Zugang übersprungen"
+else
+    info "Kein Dashy-Zugang (DASHY_PUB_KEY/DASHY_FROM leer) — später: setup-dashy-access.sh"
+fi
+
 # ── Netdata ───────────────────────────────────────────────────────────────
 # Nur Agent-Install + Loopback-Bind. Die Parent-Child-Stream-Config wird bewusst
 # NICHT hier gesetzt, sondern zentral über das proxmox-netdata-Repo

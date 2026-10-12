@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# dashy-gate — ForceCommand für den SSH-User "dashy".
+# Lässt genau zwei Aufrufformen durch (ohne eval, ohne Shell):
+#   sudo -n /usr/local/sbin/dashy-sites
+#   sudo -n -u <siteuser> /usr/local/sbin/dashy-wp <domain> <args…>
+# Alles andere endet mit Exit 77. Damit gibt es für dashy keine freie Shell
+# (kein ps, kein cat, kein scp), auch wenn restrict in authorized_keys fehlt.
+set -euo pipefail
+
+EXIT_DENIED=77
+ORIG="${SSH_ORIGINAL_COMMAND:-}"
+deny() {
+    logger -t dashy -p auth.warning -- "gate=denied reason=$1 len=${#ORIG} sha=$(printf '%s' "$ORIG" | sha256sum | cut -c1-12)" 2>/dev/null || true
+    echo "dashy-gate: abgelehnt ($1)" >&2
+    exit "$EXIT_DENIED"
+}
+
+[[ -n "$ORIG" ]] || deny "leer"
+[[ "$ORIG" != *$'\n'* ]] || deny "newline"
+# Keine Shell-Metazeichen: die Zeile wird nur an Whitespace zerlegt, nie interpretiert
+[[ "$ORIG" =~ ^[A-Za-z0-9_@=,./:[:space:]-]+$ ]] || deny "zeichen"
+read -ra ARGV <<<"$ORIG"
+
+if [[ "${ARGV[*]}" == "sudo -n /usr/local/sbin/dashy-sites" ]]; then
+    exec sudo -n /usr/local/sbin/dashy-sites
+fi
+if [[ ${#ARGV[@]} -ge 6 && "${ARGV[0]}" == sudo && "${ARGV[1]}" == -n && "${ARGV[2]}" == -u \
+      && "${ARGV[3]}" =~ ^[a-z_][a-z0-9_]{0,31}$ && "${ARGV[3]}" != root \
+      && "${ARGV[4]}" == /usr/local/sbin/dashy-wp ]]; then
+    exec sudo -n -u "${ARGV[3]}" /usr/local/sbin/dashy-wp "${ARGV[@]:5}"
+fi
+deny "form"

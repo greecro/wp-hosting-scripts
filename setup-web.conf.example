@@ -70,6 +70,13 @@ THEME_BUCKET=wp-themes
 # gezielter Pull statt Full-Mirror — siehe sync-media.sh --domain <domain>.
 MEDIA_BUCKET=media
 
+# ── Dashy-Management-Zugang (optional; beide Werte zusammen oder keiner) ──
+# Public Key des Dashy-Hosts (eine Zeile, in Anführungszeichen) und seine IP/CIDR.
+# Richtet User "dashy" mit restriktivem Key, Read-only-wp-cli-Wrapper und
+# Site-Registry ein — siehe setup-dashy-access.sh (auch einzeln nachrüstbar).
+DASHY_PUB_KEY=""
+DASHY_FROM=
+
 # ── Monitoring (optional): IP des Netdata-Parents. Nur wenn gesetzt wird Port
 #    19999 in der Firewall für genau diese Quelle geöffnet (sonst bleibt 19999 zu). ──
 NETDATA_PARENT_IP=

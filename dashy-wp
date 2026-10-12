@@ -1,0 +1,267 @@
+#!/usr/bin/env bash
+# dashy-wp — Read-only-Wrapper um wp-cli für das Management-Dashboard "Dashy".
+#
+# Aufruf (über sudoers, als Site-User; der SSH-Weg führt über dashy-gate):
+#   sudo -n -u <siteuser> /usr/local/sbin/dashy-wp <domain> <wp-subcommand> [args…]
+#
+# Sicherheitsmodell:
+#   - läuft bereits als Site-User (sudo wählt ihn), prüft aber, dass dieser User
+#     /var/www/<domain> besitzt — sonst Abbruch (kein Cross-Site-Zugriff)
+#   - erzwingt --path=/var/www/<domain>; cwd=/, leere Umgebung (env -i), keine
+#     wp-cli-Config, keine Packages — nichts aus dem Webroot steuert den Aufruf
+#   - ALLOWLIST lesender Subcommands, je Subcommand eine ALLOWLIST der Flags und
+#     bei --fields/--field eine ALLOWLIST der Feldnamen; alles andere: Exit 77
+#   - Positionals und Flag-Werte nur aus [A-Za-z0-9_,.-]
+#   - `option get` / `config get` nur für benannte, unkritische Schlüssel
+#   - jede Ausführung und jede Ablehnung als Zeile in journald (logger -t dashy);
+#     bei Ablehnung ohne Argumentwerte (nur Subcommand, Anzahl, Hash)
+#
+# Ein Schreibmodus ist bewusst NICHT enthalten; er kommt als eigener, getrennt
+# freizugebender Pfad, sobald das Audit-Log in Dashy steht.
+set -euo pipefail
+
+WP_BIN="/usr/local/bin/wp"
+WWW_ROOT="/var/www"
+EXIT_DENIED=77
+
+# ── Allowlists ──────────────────────────────────────────────────────────────
+# Flags, die bei jedem erlaubten Subcommand durchgehen
+GLOBAL_FLAGS=( --format --skip-plugins --skip-themes --quiet --no-color )
+# je Subcommand: "zusätzliche Flags" (Feld 1) | "erlaubte Feldnamen für --fields/--field" (Feld 2)
+#   Leeres Feld 2 heißt: --fields/--field verboten.
+declare -A CMD_FLAGS CMD_FIELDS
+spec() { CMD_FLAGS["$1"]="$2"; CMD_FIELDS["$1"]="$3"; }
+spec "cli version"             ""                              ""
+spec "cli info"                ""                              ""
+spec "core version"            "--extra"                       ""
+spec "core is-installed"       ""                              ""
+spec "core check-update"       "--major --minor --fields --field" "version update_type package_url"
+spec "core verify-checksums"   "--version --locale"            ""
+spec "plugin list"             "--status --update --fields --field --name" "name status update version update_version auto_update title"
+spec "plugin status"           ""                              ""
+spec "plugin get"              "--fields --field"              "name title author version status update update_version"
+spec "plugin is-active"        ""                              ""
+spec "plugin is-installed"     ""                              ""
+spec "plugin verify-checksums" "--all --strict --version"      ""
+spec "theme list"              "--status --update --fields --field" "name status update version update_version auto_update title"
+spec "theme status"            ""                              ""
+spec "theme get"               "--fields --field"              "name title author version status update update_version template"
+spec "theme is-active"         ""                              ""
+spec "theme is-installed"      ""                              ""
+spec "option get"              ""                              ""
+spec "config get"              "--type"                        ""
+spec "user list"               "--role --fields --field"       "ID user_login user_email display_name user_registered roles"
+spec "db size"                 "--tables --human-readable --size_format --all-tables" ""
+spec "db tables"               "--all-tables"                  ""
+spec "db prefix"               ""                              ""
+spec "cron event list"         "--fields --field --hook"       "hook next_run_gmt next_run_relative recurrence"
+spec "language core list"      "--status --fields --field"     "language english_name native_name status update updated"
+spec "maintenance-mode status" ""                              ""
+# Pflicht-Flags: ohne --fields/--field liefert das Kommando mehr als gewünscht
+declare -A CMD_REQUIRE
+CMD_REQUIRE["user list"]="--fields --field"
+
+ALLOWED_OPTIONS=(
+    siteurl home blogname blogdescription admin_email timezone_string WPLANG
+    template stylesheet active_plugins permalink_structure users_can_register
+    default_role blog_public db_version initial_db_version
+    woocommerce_version woocommerce_currency woocommerce_db_version
+)
+ALLOWED_CONFIG=(
+    WP_DEBUG WP_CACHE WP_MEMORY_LIMIT WP_MAX_MEMORY_LIMIT DISABLE_WP_CRON
+    WP_ENVIRONMENT_TYPE WP_AUTO_UPDATE_CORE AUTOMATIC_UPDATER_DISABLED
+    DISALLOW_FILE_EDIT DISALLOW_FILE_MODS WP_HOME WP_SITEURL table_prefix
+)
+VALUE_RE='^[A-Za-z0-9_,.-]*$'
+
+# ── Helfer ──────────────────────────────────────────────────────────────────
+in_list() { local needle="$1"; shift; local x; for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done; return 1; }
+now_ms() { local us="${EPOCHREALTIME:-0.0}"; us="${us/./}"; echo $(( 10#${us} / 1000 )); }
+
+LOG_DOMAIN="-"
+log_line() {  # log_line <exit> <ms> <reason> <cmd-feld>
+    logger -t dashy -p auth.info -- \
+        "site=${LOG_DOMAIN} caller=${SUDO_USER:-?} runas=$(id -un) exit=$1 ms=$2 reason=$3 cmd=$4" 2>/dev/null || true
+}
+# Bei Ablehnung keine Argumentwerte ins Log: nur erstes Wort, Anzahl, Hash
+deny() {  # deny <reason> <args…>
+    local reason="$1"; shift
+    local first="${1:-}" n=$# h
+    [[ "$first" =~ ^[A-Za-z0-9_-]{0,32}$ ]] || first="?"
+    h=$(printf '%s\0' "$@" | sha256sum | cut -c1-12)
+    log_line "$EXIT_DENIED" 0 "$reason" "${first} argc=${n} sha=${h}"
+    echo "dashy-wp: abgelehnt (${reason})" >&2
+    exit "$EXIT_DENIED"
+}
+
+# ── Prüfung der Kommandozeile (reine Funktion, auch für --selftest) ────────
+# stdout: Subcommand (ok) bzw. Grund (abgelehnt); Rückgabe 0/1.
+check_args() {
+    local -a args=("$@") words=() flags=()
+    local a key val cmd="" n
+    [[ ${#args[@]} -ge 1 ]] || { echo "kein subcommand"; return 1; }
+    for a in "${args[@]}"; do [[ -n "$a" ]] || { echo "leeres argument"; return 1; }; done
+    # Subcommand = Positionals bis zum ersten Flag, längster Treffer aus 1..3 Wörtern
+    for a in "${args[@]}"; do
+        [[ "$a" == -* ]] && break
+        words+=("$a"); [[ ${#words[@]} -ge 3 ]] && break
+    done
+    n=${#words[@]}
+    while (( n > 0 )); do
+        cmd="${words[*]:0:$n}"
+        [[ -n "${CMD_FLAGS[$cmd]+x}" ]] && break
+        cmd=""; n=$((n-1))
+    done
+    [[ -n "$cmd" ]] || { echo "subcommand nicht in allowlist: ${words[*]:-?}"; return 1; }
+    local -a extra_flags; read -ra extra_flags <<<"${CMD_FLAGS[$cmd]}"
+    local -a fields_ok;   read -ra fields_ok   <<<"${CMD_FIELDS[$cmd]}"
+
+    # Alle Tokens nach dem Subcommand prüfen
+    local -a rest=("${args[@]:$n}") positionals=()
+    for a in "${rest[@]}"; do
+        if [[ "$a" == --* ]]; then
+            key="${a%%=*}"; val=""; [[ "$a" == *=* ]] && val="${a#*=}"
+            in_list "$key" "${GLOBAL_FLAGS[@]}" "${extra_flags[@]}" || { echo "flag ${key} nicht erlaubt für ${cmd}"; return 1; }
+            [[ "$val" =~ $VALUE_RE ]] || { echo "flag ${key}: wert ungültig"; return 1; }
+            if [[ "$key" == --fields || "$key" == --field ]]; then
+                [[ -n "$val" ]] || { echo "${key} ohne wert"; return 1; }
+                local f _fl; IFS=',' read -ra _fl <<<"$val"
+                for f in "${_fl[@]}"; do
+                    in_list "$f" "${fields_ok[@]}" || { echo "feld ${f} nicht erlaubt für ${cmd}"; return 1; }
+                done
+            fi
+            flags+=("$key")
+        elif [[ "$a" == -* ]]; then
+            echo "kurzflag ${a} nicht erlaubt"; return 1
+        else
+            [[ "$a" =~ $VALUE_RE && -n "$a" ]] || { echo "positional ungültig"; return 1; }
+            positionals+=("$a")
+        fi
+    done
+
+    # Pflicht-Flags
+    if [[ -n "${CMD_REQUIRE[$cmd]+x}" ]]; then
+        local req ok=1; for req in ${CMD_REQUIRE[$cmd]}; do in_list "$req" "${flags[@]}" && ok=0; done
+        (( ok == 0 )) || { echo "${cmd}: ${CMD_REQUIRE[$cmd]} ist pflicht"; return 1; }
+    fi
+
+    # Positionals: nur dort erlaubt, wo sie Sinn haben
+    case "$cmd" in
+        "option get")
+            [[ ${#positionals[@]} -eq 1 ]] || { echo "option get: genau ein schlüssel"; return 1; }
+            in_list "${positionals[0]}" "${ALLOWED_OPTIONS[@]}" || { echo "option ${positionals[0]} nicht in allowlist"; return 1; } ;;
+        "config get")
+            [[ ${#positionals[@]} -eq 1 ]] || { echo "config get: genau ein schlüssel"; return 1; }
+            in_list "${positionals[0]}" "${ALLOWED_CONFIG[@]}" || { echo "config ${positionals[0]} nicht in allowlist"; return 1; } ;;
+        "plugin get"|"plugin is-active"|"plugin is-installed"|"theme get"|"theme is-active"|"theme is-installed")
+            [[ ${#positionals[@]} -eq 1 ]] || { echo "${cmd}: genau ein slug"; return 1; } ;;
+        "plugin verify-checksums")
+            : ;;  # beliebig viele Slugs erlaubt
+        *)
+            [[ ${#positionals[@]} -eq 0 ]] || { echo "${cmd}: keine positionals erlaubt"; return 1; } ;;
+    esac
+    echo "$cmd"
+    return 0
+}
+
+selftest() {
+    local fails=0
+    t() {  # t <erwartet: ok|deny> <args…>
+        local want="$1"; shift
+        local out rc=0
+        out=$(check_args "$@") || rc=1
+        if { [[ "$want" == ok && $rc -eq 0 ]] || [[ "$want" == deny && $rc -eq 1 ]]; }; then
+            printf '  ok    %-5s %s\n' "$want" "$*"
+        else
+            printf '  FAIL  %-5s %s  -> %s\n' "$want" "$*" "$out"; fails=$((fails+1))
+        fi
+    }
+    echo "dashy-wp selftest"
+    t ok   core version
+    t ok   core version --extra --format=json
+    t ok   core check-update --format=json
+    t ok   plugin list --status=active --fields=name,version,update --format=json
+    t ok   plugin get hello-dolly --field=version
+    t ok   plugin verify-checksums --all
+    t ok   plugin verify-checksums akismet hello-dolly
+    t deny plugin verify-checksums --all --insecure
+    t deny cron event list some_hook
+    t ok   theme list --format=json
+    t ok   option get siteurl
+    t ok   config get WP_DEBUG --format=json
+    t ok   user list --fields=ID,user_login,roles --format=json
+    t ok   db size --tables --human-readable
+    t ok   cron event list --format=json
+    t ok   cron event list --fields=hook,next_run_gmt
+    t ok   core version --skip-plugins --skip-themes
+    t deny plugin install hello-dolly
+    t deny plugin update --all
+    t deny core update
+    t deny option update siteurl http://x
+    t deny option get fluent_mail_settings
+    t deny option get
+    t deny config get DB_PASSWORD
+    t deny config get
+    t deny config get WP_DEBUG --config-file=/etc/passwd
+    t deny db query "SELECT 1"
+    t deny db cli
+    t deny db export
+    t deny db check
+    t deny db check --host=evil.example
+    t deny eval 'echo 1;'
+    t deny eval-file /tmp/x.php
+    t deny shell
+    t deny cron test
+    t deny user get 1
+    t deny user list
+    t deny user list --fields=user_login,user_pass
+    t deny user list --format=json
+    t deny cron event list --fields=args
+    t deny core version --exec='echo 1;'
+    t deny core version --require=/tmp/x.php
+    t deny core version --path=/var/www/other
+    t deny core version --user=1
+    t deny core version --ssh=root@host
+    t deny core version --debug
+    t deny core version --url=http://x
+    t deny plugin list --format='json;rm -rf /'
+    t deny plugin list extra-positional
+    t deny plugin get
+    t deny plugin get ../../etc
+    t deny -h
+    t deny ""
+    t deny core version ""
+    echo "fehler: ${fails}"
+    [[ $fails -eq 0 ]]
+}
+
+# ── Hauptprogramm ──────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--selftest" ]]; then selftest; exit $?; fi
+
+[[ $# -ge 2 ]] || { echo "Usage: dashy-wp <domain> <wp-subcommand> [args…]" >&2; exit 2; }
+DOMAIN="$1"; shift
+
+[[ "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$DOMAIN" != *..* ]] \
+    || deny "ungültige domain" "$@"
+LOG_DOMAIN="$DOMAIN"
+SITE_PATH="${WWW_ROOT}/${DOMAIN}"
+[[ -d "$SITE_PATH" ]] || deny "site-pfad fehlt" "$@"
+
+ME_UID=$(id -u); OWNER_UID=$(stat -c %u "$SITE_PATH")
+[[ "$ME_UID" -ne 0 ]] || deny "läuft als root" "$@"
+[[ "$ME_UID" -eq "$OWNER_UID" ]] || deny "runas-user besitzt site nicht" "$@"
+
+CMD=$(check_args "$@") || deny "$CMD" "$@"
+
+cd / || deny "cd fehlgeschlagen" "$@"
+T0=$(now_ms)
+set +e
+env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent LANG=C.UTF-8 \
+    WP_CLI_CONFIG_PATH=/dev/null WP_CLI_PACKAGES_DIR=/nonexistent \
+    WP_CLI_DISABLE_AUTO_CHECK_UPDATE=1 \
+    "$WP_BIN" --path="$SITE_PATH" --skip-packages "$@"
+RC=$?
+set -e
+T1=$(now_ms)
+log_line "$RC" "$((T1 - T0))" "ok" "$(printf '%q ' "$@")"
+exit "$RC"
