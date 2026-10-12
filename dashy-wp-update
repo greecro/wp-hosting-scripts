@@ -290,7 +290,8 @@ fi
 OLD_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
 [[ -n "$OLD_VERSION" ]] || fail "${KIND} ${SLUG}: version nicht lesbar"
 STATUS_BEFORE=$(wp_field "$KIND" get "$SLUG" --field=status)
-UPD=$(wp_field "$KIND" get "$SLUG" --field=update)
+# "update" gibt es nur bei list (get kennt das Feld nicht); --name filtert auf den Slug
+UPD=$(wp_field "$KIND" list --name="$SLUG" --field=update --format=csv)
 [[ "$UPD" == available ]] || fail "${KIND} ${SLUG}: kein update verfügbar (update=${UPD:-?})"
 
 # Snapshot (root schreibt nur hier; der Site-User liefert tar und Dump über stdout)
