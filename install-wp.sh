@@ -196,7 +196,7 @@ if command -v dig &>/dev/null; then
 fi
 
 # DB erreichbar?
-if ! mysqladmin ping -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" --silent 2>/dev/null; then
+if ! MYSQL_PWD="$DB_ADMIN_PASS" mysqladmin ping -h "$DB_HOST" -u "$DB_ADMIN_USER" --silent 2>/dev/null; then
     err "  DB-Host ${DB_HOST} nicht erreichbar oder Credentials falsch."
 fi
 log "  DB: ${DB_HOST} erreichbar"
@@ -231,7 +231,7 @@ if [[ -d "$SITE_PATH" || -f "$NGINX_VHOST" ]]; then
         rm -rf "$SFTP_CHROOT" "$SITE_PATH"
         id "wp_${DOMAIN_SAFE:0:20}" &>/dev/null && userdel "wp_${DOMAIN_SAFE:0:20}" 2>/dev/null || true
         getent group "wp_${DOMAIN_SAFE:0:20}" &>/dev/null && groupdel "wp_${DOMAIN_SAFE:0:20}" 2>/dev/null || true
-        mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" 2>/dev/null <<SQL || true
+        MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" 2>/dev/null <<SQL || true
 DROP DATABASE IF EXISTS \`wp_${DOMAIN_SAFE}\`;
 SQL
         rm -f "/etc/wp-hosting/sites/${DOMAIN}.txt"
@@ -301,7 +301,7 @@ cleanup_on_error() {
 
     # Datenbank und User entfernen
     WEB_VM_IP=$(hostname -I | awk '{print $1}')
-    mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" 2>/dev/null <<SQL || true
+    MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" 2>/dev/null <<SQL || true
 DROP DATABASE IF EXISTS \`${DB_NAME}\`;
 DROP USER IF EXISTS '${DB_USER}'@'${WEB_VM_IP}';
 SQL
@@ -664,7 +664,7 @@ ln -sf "$NGINX_VHOST" "/etc/nginx/sites-enabled/${DOMAIN}"
 log "Nginx Vhost erstellt"
 
 # ── Datenbank anlegen ─────────────────────────────────────────────────────
-mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" <<SQL
+MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'$(hostname -I | awk '{print $1}')' IDENTIFIED BY '${DB_PASS}';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON \`${DB_NAME}\`.* TO '${DB_USER}'@'$(hostname -I | awk '{print $1}')';
@@ -682,11 +682,14 @@ cd "$SITE_PATH"
 info "WordPress wird heruntergeladen..."
 sudo -u "$SYSTEM_USER" wp core download --path="$SITE_PATH" --locale=en_US --allow-root
 
-sudo -u "$SYSTEM_USER" wp config create \
+# DB-Passwort per stdin (--prompt=dbpass), nicht als --dbpass in der argv (Prozessliste).
+# stdout nach /dev/null: wp-cli druckt bei --prompt die zusammengesetzte Kommandozeile
+# inklusive Passwort. Fehler kommen weiter über stderr.
+printf '%s\n' "$DB_PASS" | sudo -u "$SYSTEM_USER" wp config create \
     --path="$SITE_PATH" \
     --dbname="$DB_NAME" \
     --dbuser="$DB_USER" \
-    --dbpass="$DB_PASS" \
+    --prompt=dbpass --quiet \
     --dbhost="$DB_HOST" \
     --dbcharset="utf8mb4" \
     --dbcollate="utf8mb4_unicode_ci" \
@@ -699,7 +702,6 @@ define('WP_POST_REVISIONS', 5);
 define('EMPTY_TRASH_DAYS', 7);
 define('DISALLOW_FILE_EDIT', true);
 define('FORCE_SSL_ADMIN', true);
-$([ -n "${SEOPRESS_KEY:-}" ] && echo "define('SEOPRESS_LICENSE_KEY', '${SEOPRESS_KEY}');")
 define('WP_DEBUG', false);
 define('WP_DEBUG_LOG', false);
 define('WP_DEBUG_DISPLAY', false);
@@ -708,17 +710,32 @@ define('WP_MAX_MEMORY_LIMIT', '512M');
 define('AUTOSAVE_INTERVAL', 120);
 define('WP_CACHE', true);
 if (isset(\$_SERVER['HTTP_X_FORWARDED_PROTO']) && \$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') { \$_SERVER['HTTPS'] = 'on'; }" \
-    --allow-root
+    --allow-root >/dev/null
 
-sudo -u "$SYSTEM_USER" wp core install \
+# Lizenzschlüssel nicht über --extra-php (argv → sudo-Log), sondern per Bash vor die
+# "That's all"-Zeile der wp-config.php schreiben (stdin ist schon durch --prompt belegt).
+if [[ -n "${SEOPRESS_KEY:-}" ]]; then
+    _cfg="${SITE_PATH}/wp-config.php"; _tmp=$(mktemp "${SITE_PATH}/.wp-config.XXXXXX"); _n=0
+    while IFS= read -r _l || [[ -n "$_l" ]]; do
+        if [[ "$_l" == "/* That's all, stop editing"* ]]; then
+            printf "define( 'SEOPRESS_LICENSE_KEY', '%s' );\n" "$SEOPRESS_KEY"; _n=$((_n + 1))
+        fi
+        printf '%s\n' "$_l"
+    done < "$_cfg" > "$_tmp"
+    [[ $_n -eq 1 ]] || { rm -f "$_tmp"; err "wp-config.php: Einfügemarke ${_n}x gefunden (erwartet 1)"; }
+    chown --reference="$_cfg" "$_tmp"; mv "$_tmp" "$_cfg"
+fi
+
+# Admin-Passwort ebenfalls per stdin (--prompt=admin_password), stdout aus demselben Grund weg.
+printf '%s\n' "$WP_ADMIN_PASS" | sudo -u "$SYSTEM_USER" wp core install \
     --path="$SITE_PATH" \
     --url="https://${DOMAIN}" \
     --title="${DOMAIN}" \
     --admin_user="$WP_ADMIN_USER" \
-    --admin_password="$WP_ADMIN_PASS" \
+    --prompt=admin_password --quiet \
     --admin_email="$WP_ADMIN_EMAIL" \
     --skip-email \
-    --allow-root
+    --allow-root >/dev/null
 log "WordPress installiert"
 
 # ── WordPress-Einstellungen ────────────────────────────────────────────────
@@ -1573,6 +1590,8 @@ if [[ -f "$FB_DB" ]] && command -v filebrowser &>/dev/null; then
     $FB_WAS_ACTIVE && { systemctl stop filebrowser 2>/dev/null || true; }
 
     FB_OK=false
+    # Bewusste Abweichung: filebrowser nimmt das Passwort nur als argv entgegen (kein stdin,
+    # kein env) — es ist für die Laufzeit des Aufrufs (< 1 s) in der Prozessliste sichtbar.
     if filebrowser users add "$FB_USER" "$FB_PASS" \
             --scope "$SITE_PATH" \
             --database "$FB_DB" \

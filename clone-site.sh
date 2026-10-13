@@ -81,7 +81,7 @@ log "Dateien kopiert: ${SRC_PATH} → ${DST_PATH}"
 
 # ── Datenbank klonen ──────────────────────────────────────────────────────
 info "Datenbank wird geklont..."
-mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" <<SQL
+MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DST_DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DST_DB_USER}'@'${WEB_VM_IP}' IDENTIFIED BY '${DST_DB_PASS}';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON \`${DST_DB_NAME}\`.* TO '${DST_DB_USER}'@'${WEB_VM_IP}';
@@ -89,16 +89,29 @@ FLUSH PRIVILEGES;
 SQL
 
 # Dump der Quell-DB und Import in Ziel-DB
-mysqldump -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" \
+MYSQL_PWD="$DB_ADMIN_PASS" mysqldump -h "$DB_HOST" -u "$DB_ADMIN_USER" \
     --single-transaction --quick "$SRC_DB_NAME" \
-    | mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DST_DB_NAME"
+    | MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DST_DB_NAME"
 log "Datenbank geklont: ${SRC_DB_NAME} → ${DST_DB_NAME}"
 
 # ── wp-config.php anpassen ────────────────────────────────────────────────
 wp config set DB_NAME     "$DST_DB_NAME" --path="$DST_PATH" --allow-root
 wp config set DB_USER     "$DST_DB_USER" --path="$DST_PATH" --allow-root
-wp config set DB_PASSWORD "$DST_DB_PASS" --path="$DST_PATH" --allow-root
 wp config set WP_CACHE_KEY_SALT "${DST_DOMAIN}:" --path="$DST_PATH" --allow-root
+# DB_PASSWORD ohne wp-cli setzen: `wp config set` nimmt den Wert nur als argv entgegen
+# (Prozessliste) und druckt ihn in der Success-Zeile. Daher die define-Zeile per Bash
+# umschreiben (Passwort ist A-Za-z0-9, in PHP-Single-Quotes unkritisch).
+_cfg="${DST_PATH}/wp-config.php"; _tmp=$(mktemp "${DST_PATH}/.wp-config.XXXXXX"); _n=0
+_re="^[[:space:]]*define[[:space:]]*\([[:space:]]*['\"]DB_PASSWORD['\"]"
+while IFS= read -r _l || [[ -n "$_l" ]]; do
+    if [[ "$_l" =~ $_re ]]; then
+        printf "define( 'DB_PASSWORD', '%s' );\n" "$DST_DB_PASS"; _n=$((_n + 1))
+    else
+        printf '%s\n' "$_l"
+    fi
+done < "$_cfg" > "$_tmp"
+[[ $_n -eq 1 ]] || { rm -f "$_tmp"; err "wp-config.php: DB_PASSWORD-Zeile ${_n}x gefunden (erwartet 1)"; }
+chown --reference="$_cfg" "$_tmp"; mv "$_tmp" "$_cfg"
 chmod 600 "${DST_PATH}/wp-config.php"
 log "wp-config.php aktualisiert"
 
@@ -158,6 +171,8 @@ if [[ -f "$FB_DB" ]] && command -v filebrowser &>/dev/null; then
     if systemctl is-active --quiet filebrowser 2>/dev/null; then _fb_was_active=true; fi
     $_fb_was_active && { systemctl stop filebrowser 2>/dev/null || true; }
     _fb_ok=false
+    # Bewusste Abweichung: filebrowser nimmt das Passwort nur als argv entgegen (kein stdin,
+    # kein env) — es ist für die Laufzeit des Aufrufs (< 1 s) in der Prozessliste sichtbar.
     if filebrowser users add "$FB_USER" "$FB_PASS" \
             --scope "$DST_PATH" \
             --database "$FB_DB" \
@@ -254,10 +269,11 @@ echo ""
 echo -e "  Quelle:     ${BOLD}https://${SRC_DOMAIN}${NC}"
 echo -e "  Ziel:       ${BOLD}https://${DST_DOMAIN}${NC}"
 echo -e "  DB:         ${BOLD}${DST_DB_NAME}${NC}"
+# Bewusst OHNE Passwörter (wie install-wp.sh): stdout landet in Scrollback, Logs und
+# Session-Mitschnitten. Die Werte stehen nur in der Site-Datei (chmod 600) → 1Password.
 echo -e "  FB-User:    ${BOLD}${FB_USER}${NC}"
-echo -e "  FB-Pass:    ${BOLD}${FB_PASS}${NC}"
 echo -e "  SFTP-User:  ${BOLD}${DST_SYSTEM_USER}${NC}"
-echo -e "  SFTP-Pass:  ${BOLD}${SFTP_PASS}${NC}"
+echo -e "  Passwörter: ${BOLD}${SITES_DIR}/${DST_DOMAIN}.txt${NC}"
 echo ""
 echo -e "${YELLOW}  → NPM Proxy-Host für https://${DST_DOMAIN} anlegen (→ Port 80).${NC}"
 echo -e "${YELLOW}  → Admin-Passwort der Quell-Site gilt auch für den Klon.${NC}"

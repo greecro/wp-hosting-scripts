@@ -77,7 +77,7 @@ log "PHP-FPM Pool entfernt"
 # ── Datenbank ─────────────────────────────────────────────────────────────
 if [[ -n "$DB_NAME" ]] && [[ -n "$DB_USER" ]]; then
     WEB_VM_IP=$(hostname -I | awk '{print $1}')
-    mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" <<SQL 2>/dev/null || warn "DB-Bereinigung teilweise fehlgeschlagen"
+    MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" <<SQL 2>/dev/null || warn "DB-Bereinigung teilweise fehlgeschlagen"
 DROP DATABASE IF EXISTS \`${DB_NAME}\`;
 DROP USER IF EXISTS '${DB_USER}'@'${WEB_VM_IP}';
 FLUSH PRIVILEGES;

@@ -669,7 +669,7 @@ chown -R www-data:www-data "$PMA_DIR"
 
 # Basic-Auth für phpMyAdmin (zweiter Schutzwall vor dem phpMyAdmin-Login)
 PMA_AUTH_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 20) || true
-PMA_AUTH_HASH=$(openssl passwd -apr1 "$PMA_AUTH_PASS")
+PMA_AUTH_HASH=$(printf '%s\n' "$PMA_AUTH_PASS" | openssl passwd -apr1 -stdin)
 echo "admin:${PMA_AUTH_HASH}" > /etc/nginx/.pma_htpasswd
 chmod 640 /etc/nginx/.pma_htpasswd
 chown root:www-data /etc/nginx/.pma_htpasswd
@@ -738,7 +738,6 @@ fi
 
 mkdir -p /etc/filebrowser
 FB_ADMIN_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 24) || true
-FB_HASHED_PASS=$(filebrowser hash "$FB_ADMIN_PASS" 2>/dev/null || echo "$FB_ADMIN_PASS")
 
 cat > /etc/filebrowser/settings.json <<'EOF'
 {
@@ -754,9 +753,16 @@ EOF
 filebrowser config init --database /etc/filebrowser/database.db \
     --address 0.0.0.0 --port 8090 --root /var/www 2>/dev/null || true
 # Admin nur anlegen, wenn noch nicht vorhanden — sonst kein wirkungsloses PW anzeigen (#6)
-if ! filebrowser users add admin "$FB_ADMIN_PASS" --perm.admin --database /etc/filebrowser/database.db 2>/dev/null; then
-    FB_ADMIN_PASS="(unverändert — Filebrowser-Admin existierte bereits; zum Zurücksetzen: filebrowser users update admin --password …)"
-    warn "Filebrowser-Admin existiert bereits — Passwort NICHT geändert"
+# Bewusste Abweichung: filebrowser nimmt das Passwort nur als argv entgegen (kein stdin,
+# kein env) — für die Laufzeit des Aufrufs (< 1 s) in der Prozessliste sichtbar.
+if filebrowser users add admin "$FB_ADMIN_PASS" --perm.admin --database /etc/filebrowser/database.db 2>/dev/null \
+   && filebrowser users ls --database /etc/filebrowser/database.db 2>/dev/null | awk '{print $2}' | grep -qxF admin; then
+    log "Filebrowser-Admin angelegt"
+else
+    # Bisherigen Wert aus der alten Config übernehmen (die wird unten neu geschrieben),
+    # sonst ginge er beim Wiederholungslauf verloren. Leer = vor dieser Version angelegt.
+    FB_ADMIN_PASS=$( FB_ADMIN_PASS=""; [[ -r /etc/wp-hosting/config ]] && source /etc/wp-hosting/config; printf '%s' "${FB_ADMIN_PASS:-}" )
+    warn "Filebrowser-Admin existiert bereits (oder DB gesperrt) — Passwort NICHT geändert"
 fi
 
 cat > /etc/systemd/system/filebrowser.service <<'EOF'
@@ -993,7 +999,7 @@ chown -R www-data:www-data /var/www
 
 # Verbindung zur DB testen
 info "Datenbankverbindung wird getestet..."
-if mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" -e "SELECT 1;" &>/dev/null; then
+if MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -e "SELECT 1;" &>/dev/null; then
     log "Datenbankverbindung erfolgreich"
 else
     warn "Datenbankverbindung fehlgeschlagen — bitte nach dem Setup prüfen"
@@ -1381,8 +1387,10 @@ mkdir -p /etc/wp-hosting/plugins
     printf 'POSTX_KEY=%q\n'      "${POSTX_KEY:-}"
     printf 'MATOMO_URL=%q\n'     "${MATOMO_URL:-}"
     printf 'PMA_AUTH_PASS=%q\n'  "${PMA_AUTH_PASS}"
-} > /etc/wp-hosting/config
-chmod 600 /etc/wp-hosting/config   # enthält DB-Admin-Passwort
+    printf 'FB_ADMIN_PASS=%q\n'  "${FB_ADMIN_PASS}"
+} > /etc/wp-hosting/config.tmp
+chmod 600 /etc/wp-hosting/config.tmp   # enthält DB-Admin-, PMA- und Filebrowser-Admin-Passwort
+mv /etc/wp-hosting/config.tmp /etc/wp-hosting/config   # nie kurz 644 lesbar
 
 # ── Slack-Alerts (notify-Helper) ───────────────────────────────────────────
 # notify() postet in einen Slack Incoming Webhook (POST JSON {text}); wird von
@@ -1442,10 +1450,15 @@ echo -e "  VM-Typ:        ${BOLD}${VM_TYPE}${NC}"
 echo -e "  DB-Host:       ${BOLD}${DB_HOST}${NC}"
 echo -e "  phpMyAdmin:    ${BOLD}http://$(hostname -I | awk '{print $1}'):8080${NC}"
 echo -e "  PMA Benutzer:  ${BOLD}admin${NC}"
-echo -e "  PMA Passwort:  ${BOLD}${PMA_AUTH_PASS}${NC}  (Basic-Auth)"
+echo -e "  PMA Passwort:  ${BOLD}PMA_AUTH_PASS in /etc/wp-hosting/config${NC}  (Basic-Auth)"
 echo -e "  Filebrowser:   ${BOLD}http://$(hostname -I | awk '{print $1}'):8090${NC}"
 echo -e "  FB Benutzer:   ${BOLD}admin${NC}"
-echo -e "  FB Passwort:   ${BOLD}${FB_ADMIN_PASS}${NC}"
+if [[ -n "$FB_ADMIN_PASS" ]]; then
+    echo -e "  FB Passwort:   ${BOLD}FB_ADMIN_PASS in /etc/wp-hosting/config${NC}"
+else
+    echo -e "  FB Passwort:   ${BOLD}unverändert${NC} (Admin existierte schon; Reset: systemctl stop filebrowser && filebrowser users update admin --password … --database /etc/filebrowser/database.db)"
+fi
+# Passwörter bewusst nicht im Terminal (Scrollback/Mitschnitt) — Werte nur in der 600-Datei.
 echo ""
 echo -e "  Netdata:       ${BOLD}http://$(hostname -I | awk '{print $1}'):19999${NC}"
 echo -e "  Konfiguration: ${BOLD}/etc/wp-hosting/config${NC}"

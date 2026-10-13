@@ -77,10 +77,20 @@ for CRED_FILE in "${CRED_FILES[@]}"; do
         continue
     fi
 
-    WP="wp --path=${SITE_PATH} --allow-root"
+    # wp-cli als Site-User, nie als root (Dateien im Webroot, DB-Zugang nur über die
+    # wp-config.php der Site). cd ins Site-Verzeichnis: wp-cli spawnt Subprozesse via
+    # proc_open mit geerbtem cwd, das der nologin-User sonst nicht betreten darf.
+    SITE_USER=$(stat -c %U "$SITE_PATH")
+    if [[ "$SITE_USER" == "root" ]]; then
+        say "$(warn "${DOMAIN} — Webroot gehört root, übersprungen")"
+        echo "[$(date '+%Y-%m-%d %H:%M')] UEBERSPRUNGEN (root-Webroot): ${DOMAIN}" >> "$LOG"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+    fi
+    WP="sudo -n -u ${SITE_USER} wp --path=${SITE_PATH}"
     say "${BLUE}── ${DOMAIN} ──${NC}"
 
-    if {
+    if cd "$SITE_PATH" && {
         # Abgelaufene Transients
         $WP transient delete --expired
 

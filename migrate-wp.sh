@@ -112,19 +112,22 @@ case "$method_choice" in
         # DB exportieren und importieren
         info "Datenbank wird exportiert und importiert..."
         TMP_SQL="/tmp/migrate-${DOMAIN_SAFE}-$(date +%s).sql.gz"
-        # MYSQL_PWD via env (statt -p auf Kommandozeile) — nicht in `ps` sichtbar
-        ssh -o StrictHostKeyChecking=no "$SRC_SSH" \
-            "MYSQL_PWD='${SRC_DB_PASS}' mysqldump -h '${SRC_DB_HOST}' -u '${SRC_DB_USER}' \
-            --single-transaction --quick '${SRC_DB_NAME}' | gzip" > "$TMP_SQL"
+        # Passwort per stdin an die Remote-Shell (read → MYSQL_PWD). Im ssh-Kommandostring
+        # stünde es in der argv von ssh UND der Remote-Shell (ps auf beiden Seiten).
+        # gzip lokal: so ist der ssh-Exit der von mysqldump und pipefail greift (remote gäbe
+        # gzip auch bei gescheitertem Dump Exit 0 → leere DB mit „importiert").
+        printf '%s\n' "$SRC_DB_PASS" | ssh -C -o StrictHostKeyChecking=no "$SRC_SSH" \
+            "IFS= read -r MYSQL_PWD; export MYSQL_PWD; exec mysqldump -h '${SRC_DB_HOST}' -u '${SRC_DB_USER}' \
+            --single-transaction --quick '${SRC_DB_NAME}'" | gzip > "$TMP_SQL"
 
         # Neue DB anlegen
-        mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" <<SQL
+        MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'${WEB_VM_IP}' IDENTIFIED BY '${DB_PASS}';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${WEB_VM_IP}';
 FLUSH PRIVILEGES;
 SQL
-        zcat "$TMP_SQL" | mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME"
+        zcat "$TMP_SQL" | MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME"
         rm -f "$TMP_SQL"
         log "Datenbank importiert"
         ;;
@@ -152,16 +155,16 @@ SQL
 
         # DB anlegen und importieren
         info "Datenbank wird importiert..."
-        mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" <<SQL
+        MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" <<SQL
 CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'${WEB_VM_IP}' IDENTIFIED BY '${DB_PASS}';
 GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, INDEX, REFERENCES, CREATE TEMPORARY TABLES, LOCK TABLES, EXECUTE, CREATE VIEW, SHOW VIEW, CREATE ROUTINE, ALTER ROUTINE, EVENT, TRIGGER ON \`${DB_NAME}\`.* TO '${DB_USER}'@'${WEB_VM_IP}';
 FLUSH PRIVILEGES;
 SQL
         if [[ "$SQL_FILE" == *.gz ]]; then
-            zcat "$SQL_FILE" | mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME"
+            zcat "$SQL_FILE" | MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME"
         else
-            mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME" < "$SQL_FILE"
+            MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME" < "$SQL_FILE"
         fi
         log "Datenbank importiert"
         ;;
@@ -173,8 +176,21 @@ esac
 info "wp-config.php wird aktualisiert..."
 wp config set DB_NAME     "$DB_NAME" --path="$SITE_PATH" --allow-root
 wp config set DB_USER     "$DB_USER" --path="$SITE_PATH" --allow-root
-wp config set DB_PASSWORD "$DB_PASS" --path="$SITE_PATH" --allow-root
 wp config set DB_HOST     "$DB_HOST" --path="$SITE_PATH" --allow-root
+# DB_PASSWORD ohne wp-cli setzen: `wp config set` nimmt den Wert nur als argv entgegen
+# (Prozessliste) und druckt ihn in der Success-Zeile. Daher die define-Zeile per Bash
+# umschreiben (Passwort ist A-Za-z0-9, in PHP-Single-Quotes unkritisch).
+_cfg="${SITE_PATH}/wp-config.php"; _tmp=$(mktemp "${SITE_PATH}/.wp-config.XXXXXX"); _n=0
+_re="^[[:space:]]*define[[:space:]]*\([[:space:]]*['\"]DB_PASSWORD['\"]"
+while IFS= read -r _l || [[ -n "$_l" ]]; do
+    if [[ "$_l" =~ $_re ]]; then
+        printf "define( 'DB_PASSWORD', '%s' );\n" "$DB_PASS"; _n=$((_n + 1))
+    else
+        printf '%s\n' "$_l"
+    fi
+done < "$_cfg" > "$_tmp"
+[[ $_n -eq 1 ]] || { rm -f "$_tmp"; err "wp-config.php: DB_PASSWORD-Zeile ${_n}x gefunden (erwartet 1)"; }
+chown --reference="$_cfg" "$_tmp"; mv "$_tmp" "$_cfg"
 
 # Redis
 wp config set WP_REDIS_HOST     "127.0.0.1" --path="$SITE_PATH" --allow-root
@@ -407,6 +423,8 @@ if [[ -f "$FB_DB" ]] && command -v filebrowser &>/dev/null; then
     if systemctl is-active --quiet filebrowser 2>/dev/null; then _fb_was_active=true; fi
     $_fb_was_active && { systemctl stop filebrowser 2>/dev/null || true; }
     _fb_ok=false
+    # Bewusste Abweichung: filebrowser nimmt das Passwort nur als argv entgegen (kein stdin,
+    # kein env) — es ist für die Laufzeit des Aufrufs (< 1 s) in der Prozessliste sichtbar.
     if filebrowser users add "$FB_USER" "$FB_PASS" \
             --scope "$SITE_PATH" --database "$FB_DB" \
             --perm.create --perm.rename --perm.modify --perm.delete --perm.download >/dev/null 2>&1 \
@@ -519,10 +537,11 @@ echo ""
 echo -e "  URL:        ${BOLD}https://${DOMAIN}${NC}"
 echo -e "  WP-Admin:   ${BOLD}https://${DOMAIN}/wp-admin${NC}"
 echo -e "  DB-Name:    ${BOLD}${DB_NAME}${NC}"
+# Bewusst OHNE Passwörter (wie install-wp.sh): stdout landet in Scrollback, Logs und
+# Session-Mitschnitten. Die Werte stehen nur in der Site-Datei (chmod 600) → 1Password.
 echo -e "  FB-User:    ${BOLD}${FB_USER}${NC}"
-echo -e "  FB-Pass:    ${BOLD}${FB_PASS}${NC}"
 echo -e "  SFTP-User:  ${BOLD}${SYSTEM_USER}${NC}"
-echo -e "  SFTP-Pass:  ${BOLD}${SFTP_PASS}${NC}"
+echo -e "  Passwörter: ${BOLD}/etc/wp-hosting/sites/${DOMAIN}.txt${NC}"
 echo ""
 echo -e "${YELLOW}  → NPM Proxy-Host für https://${DOMAIN} anlegen (→ Port 80).${NC}"
 echo -e "${YELLOW}  → Admin-Zugangsdaten vom Quell-Server gelten weiterhin.${NC}"

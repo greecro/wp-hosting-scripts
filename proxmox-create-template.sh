@@ -133,7 +133,8 @@ qm set "$TEMPLATE_ID" --boot order=scsi0
 qm set "$TEMPLATE_ID" \
     --citype nocloud \
     --ciuser ubuntu \
-    --cipassword "$ROOT_SSH_PASS" \
+    `# cipassword vorgehasht: argv und PVE-Tasklog zeigen nur den Hash; PVE 9 reicht $6$ unverändert durch` \
+    --cipassword "$(printf '%s\n' "$ROOT_SSH_PASS" | openssl passwd -6 -stdin)" \
     --ipconfig0 "ip=dhcp"
 
 # Vendor-Daten: SSH-Passwort-Login aktivieren (läuft zusätzlich zu Proxmox-User-Daten)
@@ -180,9 +181,14 @@ echo -e "  RAM:             ${BOLD}${TEMPLATE_RAM} MB${NC}"
 echo -e "  Disk:            ${BOLD}${TEMPLATE_DISK} GB${NC}"
 echo -e "  Storage:         ${BOLD}${STORAGE}${NC}"
 echo ""
-echo -e "${BOLD}  SSH-Passwort (User: ubuntu): ${ROOT_SSH_PASS}${NC}"
+# Cloud-Init-Passwort nicht ins Terminal (Scrollback/Mitschnitt), sondern in eine 600-Datei
+# auf dem PVE-Host; von dort nach 1Password übernehmen.
+_CI_FILE="/root/.wp-hosting/template-${TEMPLATE_ID}-cipassword.txt"
+mkdir -p /root/.wp-hosting; chmod 700 /root/.wp-hosting
+( umask 077; printf 'TEMPLATE_ID=%s\nSSH_USER=ubuntu\nSSH_PASS=%s\n' "$TEMPLATE_ID" "$ROOT_SSH_PASS" > "$_CI_FILE" ); chmod 600 "$_CI_FILE"   # umask greift nicht bei vorhandener Datei (ID-Wiederverwendung)
+echo -e "${BOLD}  SSH-Passwort (User: ubuntu): in ${_CI_FILE}${NC} (nicht im Terminal)"
 echo ""
-echo -e "${YELLOW}  → Passwort notieren! (cloud-init setzt es für den User 'ubuntu', nicht root)${NC}"
+echo -e "${YELLOW}  → Passwort von dort nach 1Password (cloud-init setzt es für 'ubuntu', nicht root)${NC}"
 echo -e "${YELLOW}  → Nächster Schritt:${NC}"
 echo ""
 echo "     curl -sO https://raw.githubusercontent.com/greecro/wp-hosting-scripts/main/proxmox-create-vm.sh"

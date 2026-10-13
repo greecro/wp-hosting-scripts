@@ -232,7 +232,7 @@ if $RESTORE_DB && [[ -n "$SQL_FILE" ]]; then
     DB_ROLLBACK="${DB_ROLLBACK_DIR}/${DB_NAME}_$(date +%Y%m%d%H%M%S).sql.gz"
     mkdir -p "$DB_ROLLBACK_DIR"; chmod 700 "$DB_ROLLBACK_DIR"
     info "Sichere aktuelle DB vor Import → ${DB_ROLLBACK}"
-    if ! mysqldump -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" \
+    if ! MYSQL_PWD="$DB_ADMIN_PASS" mysqldump -h "$DB_HOST" -u "$DB_ADMIN_USER" \
             --single-transaction --quick "$DB_NAME" 2>/dev/null | gzip > "$DB_ROLLBACK"; then
         rm -f "$DB_ROLLBACK"
         err "Pre-Restore-Snapshot der DB fehlgeschlagen — Import abgebrochen (DB unverändert)."
@@ -245,24 +245,24 @@ if $RESTORE_DB && [[ -n "$SQL_FILE" ]]; then
             [[ ! -f "$AGE_KEY" ]] && { warn "backup-key.txt fehlt"; return 1; }
             command -v age &>/dev/null || { warn "age nicht installiert"; return 1; }
             age -d -i "$AGE_KEY" "$SQL_FILE" | zcat | \
-                mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME"
+                MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME"
         elif [[ "$SQL_FILE" == *.gz ]]; then
-            zcat "$SQL_FILE" | mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME"
+            zcat "$SQL_FILE" | MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME"
         else
-            mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME" < "$SQL_FILE"
+            MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME" < "$SQL_FILE"
         fi
     }
 
     # Tabellen leeren (nicht DB droppen — User-Rechte bleiben erhalten).
     # Fehler NICHT schlucken: bei Problemen abbrechen, DB ist noch unverändert.
-    TABLES=$(mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" \
+    TABLES=$(MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" \
         -e "SELECT table_name FROM information_schema.tables WHERE table_schema='${DB_NAME}';" \
         --skip-column-names 2>/dev/null || echo "")
     if [[ -n "$TABLES" ]]; then
         DROP_SQL=$( { echo "SET FOREIGN_KEY_CHECKS=0;"; \
             while IFS= read -r tbl; do [[ -n "$tbl" ]] && printf 'DROP TABLE IF EXISTS `%s`;\n' "$tbl"; done <<< "$TABLES"; \
             echo "SET FOREIGN_KEY_CHECKS=1;"; } )
-        if ! printf '%s\n' "$DROP_SQL" | mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME"; then
+        if ! printf '%s\n' "$DROP_SQL" | MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME"; then
             err "Tabellen konnten nicht geleert werden — Import abgebrochen (DB unverändert, Snapshot: ${DB_ROLLBACK})."
         fi
     fi
@@ -274,7 +274,7 @@ if $RESTORE_DB && [[ -n "$SQL_FILE" ]]; then
     else
         warn "Import fehlgeschlagen — DB wird aus Pre-Restore-Snapshot zurückgerollt..."
         if { echo "SET FOREIGN_KEY_CHECKS=0;"; zcat "$DB_ROLLBACK"; echo "SET FOREIGN_KEY_CHECKS=1;"; } | \
-                mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" "$DB_NAME"; then
+                MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" "$DB_NAME"; then
             err "Import fehlgeschlagen, DB erfolgreich zurückgerollt (Stand vor Restore wiederhergestellt)."
         else
             err "Import UND Rollback fehlgeschlagen — DB möglicherweise inkonsistent. Snapshot: ${DB_ROLLBACK}"

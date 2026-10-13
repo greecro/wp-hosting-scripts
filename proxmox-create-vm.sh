@@ -182,7 +182,8 @@ qm set "$VM_ID" \
     --nameserver "$VM_DNS" \
     --searchdomain "local" \
     --ciuser ubuntu \
-    --cipassword "$CI_PASS"
+    `# cipassword vorgehasht: argv und PVE-Tasklog zeigen nur den Hash; PVE 9 reicht $6$ unverändert durch` \
+    --cipassword "$(printf '%s\n' "$CI_PASS" | openssl passwd -6 -stdin)"
 
 if [[ -n "$SSH_KEY" ]]; then
     echo "$SSH_KEY" > /tmp/vm-sshkey.pub
@@ -231,7 +232,12 @@ echo -e "  VM-ID:         ${BOLD}${VM_ID}${NC}"
 echo -e "  Typ:           ${BOLD}${VM_LABEL}${NC}"
 echo -e "  IP:            ${BOLD}${VM_IP}${NC}"
 echo -e "  SSH-User:      ${BOLD}ubuntu${NC}"
-echo -e "  SSH-Passwort:  ${BOLD}${CI_PASS}${NC}"
+# Cloud-Init-Passwort nicht ins Terminal (Scrollback/Mitschnitt), sondern in eine 600-Datei
+# auf dem PVE-Host; von dort nach 1Password übernehmen.
+_CI_FILE="/root/.wp-hosting/${VM_ID}-cipassword.txt"
+mkdir -p /root/.wp-hosting; chmod 700 /root/.wp-hosting
+( umask 077; printf 'VM_ID=%s\nSSH_USER=ubuntu\nSSH_PASS=%s\n' "$VM_ID" "$CI_PASS" > "$_CI_FILE" ); chmod 600 "$_CI_FILE"   # umask greift nicht bei vorhandener Datei (ID-Wiederverwendung)
+echo -e "  SSH-Passwort:  ${BOLD}in ${_CI_FILE}${NC} (nicht im Terminal)"
 echo ""
 
 case "$VM_TYPE" in

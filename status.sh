@@ -99,7 +99,7 @@ if [[ -n "$(ls -A "$SITES_DIR" 2>/dev/null)" ]]; then
         DB_NAME=$(grep "^DB-Name:" "$f" 2>/dev/null | awk '{print $2}')
         DB_SIZE="—"
         if [[ -n "$DB_NAME" ]]; then
-            DB_BYTES=$(mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" -N -B \
+            DB_BYTES=$(MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -N -B \
                 -e "SELECT COALESCE(SUM(data_length+index_length),0) FROM information_schema.tables WHERE table_schema='${DB_NAME}';" 2>/dev/null || echo "0")
             if [[ "$DB_BYTES" -gt 0 ]]; then
                 DB_SIZE=$(awk -v b="$DB_BYTES" 'BEGIN { if (b<1048576) printf "%dK", b/1024; else if (b<1073741824) printf "%.0fM", b/1048576; else printf "%.1fG", b/1073741824 }')

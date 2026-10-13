@@ -78,8 +78,10 @@ case "$pass_choice" in
 esac
 
 # Passwort zurücksetzen
-wp user update "$TARGET_USER" --user_pass="$NEW_PASS" \
-    --path="$SITE_PATH" --allow-root
+# Passwort per stdin (--prompt=user_pass), nicht als argv; stdout weg, weil wp-cli bei
+# --prompt die zusammengesetzte Kommandozeile samt Passwort druckt.
+printf '%s\n' "$NEW_PASS" | wp user update "$TARGET_USER" --prompt=user_pass --quiet \
+    --path="$SITE_PATH" --allow-root >/dev/null
 log "Passwort zurückgesetzt für: ${TARGET_USER}"
 
 # Alle Sessions dieses Users invalidieren (Sicherheit)
@@ -88,7 +90,16 @@ wp user session destroy "$TARGET_USER" --all \
 log "Alle aktiven Sessions beendet"
 
 # Credentials-Datei aktualisieren
-sed -i "s/^Admin-Pass:.*/Admin-Pass:    ${NEW_PASS}/" "$CRED_FILE"
+# Zeile per Bash ersetzen — bei sed stünde das Passwort in der argv (Prozessliste).
+_tmp=$(mktemp "${CRED_FILE}.XXXXXX"); _n=0
+while IFS= read -r _l || [[ -n "$_l" ]]; do
+    case "$_l" in
+        "Admin-Pass:"*) printf 'Admin-Pass:    %s\n' "$NEW_PASS"; _n=$((_n + 1)) ;;
+        *)              printf '%s\n' "$_l" ;;
+    esac
+done < "$CRED_FILE" > "$_tmp"
+[[ $_n -eq 1 ]] || { rm -f "$_tmp"; err "Admin-Pass-Zeile ${_n}x in ${CRED_FILE} gefunden (erwartet 1) — Passwort ist in WP gesetzt, Datei von Hand nachziehen"; }
+chmod 600 "$_tmp"; mv "$_tmp" "$CRED_FILE"
 log "Credentials-Datei aktualisiert"
 
 echo ""
@@ -99,7 +110,7 @@ echo ""
 echo -e "  Site:       ${BOLD}https://${DOMAIN}${NC}"
 echo -e "  WP-Admin:   ${BOLD}https://${DOMAIN}/wp-admin${NC}"
 echo -e "  Benutzer:   ${BOLD}${TARGET_USER}${NC}"
-echo -e "  Passwort:   ${BOLD}${NEW_PASS}${NC}"
+echo -e "  Passwort:   ${BOLD}in ${CRED_FILE}${NC} (nicht im Terminal — Scrollback/Mitschnitt)"
 echo ""
-echo -e "${YELLOW}  → Neues Passwort notieren!${NC}"
+echo -e "${YELLOW}  → Passwort aus ${CRED_FILE} nach 1Password übernehmen.${NC}"
 echo ""

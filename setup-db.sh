@@ -326,7 +326,11 @@ ADMIN_PASS=$(cat /dev/urandom | tr -dc 'A-Za-z0-9' | head -c 32) || true
 IFS=',' read -ra VM_IPS <<< "$WEB_VM_IPS"
 for VM_IP in "${VM_IPS[@]}"; do
     VM_IP=$(echo "$VM_IP" | tr -d ' ')
-    mysql -e "CREATE OR REPLACE USER '${ADMIN_USER}'@'${VM_IP}' IDENTIFIED BY '${ADMIN_PASS}';"
+    [[ "$VM_IP" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || err "WEB_VM_IPS: '${VM_IP}' ist keine IPv4-Adresse"
+    # Passwort per Heredoc (stdin), nicht per -e — sonst steht es in der argv/Prozessliste.
+    mysql <<SQL
+CREATE OR REPLACE USER '${ADMIN_USER}'@'${VM_IP}' IDENTIFIED BY '${ADMIN_PASS}';
+SQL
     # KEIN 'ALL ON *.*' — das schlösse FILE/SUPER/SHUTDOWN/PROCESS/REPLICATION ein und gäbe
     # einer evtl. kompromittierten Web-VM OS-/Server-Zugriff auf die DB-VM. Stattdessen nur:
     #  - die nötigen globalen Rechte (CREATE DATABASE, CREATE/DROP USER, FLUSH)
@@ -620,7 +624,7 @@ echo -e "  DB-Host-IP:    ${BOLD}$(hostname -I | awk '{print $1}')${NC}"
 echo ""
 echo -e "${BOLD}  Diese Daten bei setup-web.sh eingeben:${NC}"
 echo -e "  DB-Admin-User: ${BOLD}${ADMIN_USER}${NC}"
-echo -e "  DB-Admin-Pass: ${BOLD}${ADMIN_PASS}${NC}"
+echo -e "  DB-Admin-Pass: ${BOLD}in /etc/wp-hosting/db-credentials.txt${NC} (nicht im Terminal — Scrollback/Mitschnitt)"
 echo ""
 echo -e "  InnoDB Buffer: ${BOLD}${IB_POOL}${NC}"
 echo ""
@@ -636,6 +640,6 @@ chmod 600 /etc/wp-hosting/db-credentials.txt
 echo -e "  Netdata:       ${BOLD}http://$(hostname -I | awk '{print $1}'):19999${NC}"
 echo ""
 echo -e "${YELLOW}  → Zugangsdaten gespeichert: /etc/wp-hosting/db-credentials.txt${NC}"
-echo -e "${YELLOW}  → Unbedingt notieren — werden nur einmal angezeigt!${NC}"
+echo -e "${YELLOW}  → Passwort von dort nach 1Password übernehmen (chmod 600, nur root).${NC}"
 echo -e "${YELLOW}  → Netdata in Uptime Kuma als Monitor hinzufügen.${NC}"
 echo ""

@@ -59,7 +59,7 @@ else
 fi
 
 # MariaDB-Verbindung von dieser VM
-if mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" -p"$DB_ADMIN_PASS" \
+if MYSQL_PWD="$DB_ADMIN_PASS" mysql -h "$DB_HOST" -u "$DB_ADMIN_USER" \
     -e "SELECT 1;" &>/dev/null 2>&1; then
     log "Datenbankverbindung (${DB_HOST}) OK"
 else
@@ -123,7 +123,7 @@ for f in "${SITES_DIR}"/*.txt; do
     SITE_DB_PASS=$(grep "^DB-Pass:" "$f" 2>/dev/null | awk '{print $2}' || echo "")
 
     if [[ -n "$SITE_DB_NAME" && -n "$SITE_DB_USER" ]]; then
-        if mysql -h "$DB_HOST" -u "$SITE_DB_USER" -p"$SITE_DB_PASS" \
+        if MYSQL_PWD="$SITE_DB_PASS" mysql -h "$DB_HOST" -u "$SITE_DB_USER" \
             "$SITE_DB_NAME" -e "SELECT 1;" &>/dev/null 2>&1; then
             DB_STATUS="${GREEN}OK${NC}"
         else
