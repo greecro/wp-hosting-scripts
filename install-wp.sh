@@ -1270,6 +1270,40 @@ add_filter('blocksy:footer:copyright:default-value', function () {
 });
 MUPLUGIN
 
+# eazyanalytics-Pixel: Host + Key setzt das Provisioning (provision-endpoint.sh) als Optionen —
+# hier bewusst kein Hostname (public Repo). Tracking ist consent-pflichtig (advanced/Replays):
+# die FAZ-Filter stufen das Script als "analytics" ein, FAZ blockt es bis zum Opt-in.
+# Die Platzhalterseite (maintenance-mode.php) lädt es nie — dort gibt es kein Consent-Banner.
+cat > "${SITE_PATH}/wp-content/mu-plugins/eazyanalytics-pixel.php" <<'MUPLUGIN'
+<?php
+/**
+ * Plugin Name: eazyanalytics Pixel
+ * Description: Tracking-Snippet, sobald das Provisioning pixel_host + pixel_key gesetzt hat; FAZ blockt es bis zum Cookie-Opt-in (Kategorie analytics).
+ */
+function wph_eazy_pixel_host() {
+    $h = get_option('eazyanalytics_pixel_host');
+    return (is_string($h) && preg_match('/^[a-z0-9.-]+$/i', $h)) ? $h : '';
+}
+add_action('wp_head', function () {
+    $h = wph_eazy_pixel_host();
+    $k = get_option('eazyanalytics_pixel_key');
+    if (!$h || !is_string($k) || !preg_match('/^[A-Za-z0-9]+$/', $k)) {
+        return;
+    }
+    echo '<script defer src="https://' . $h . '/pixel/' . $k . '"></script>' . "\n";
+}, 20);
+add_filter('faz_blocking_rules', function ($map) {
+    $h = wph_eazy_pixel_host();
+    if ($h) { $map[$h] = 'analytics'; }
+    return $map;
+});
+add_filter('faz_blocking_rules_client', function ($providers) {
+    $h = wph_eazy_pixel_host();
+    if ($h) { $providers[$h] = array('analytics'); }
+    return $providers;
+});
+MUPLUGIN
+
 cat > "${SITE_PATH}/wp-content/mu-plugins/server-cache.php" <<'MUPLUGIN'
 <?php
 /**

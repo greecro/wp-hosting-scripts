@@ -258,6 +258,7 @@ sudo bash maintenance.sh
 | `server-cache.php` | Site-Health-Cache-Warnung unterdrücken |
 | `performance.php` | Heartbeat drosseln, Admin-Bar ausblenden, Author-Enumeration blockieren |
 | `maintenance-mode.php` | Maintenance Mode (Flag-Datei `/wp-content/.maintenance-active`) |
+| `eazyanalytics-pixel.php` | eazyanalytics-Tracking, sobald das Provisioning Pixel-Host + Key als Optionen gesetzt hat; vom Cookie-Consent (Kategorie `analytics`) bis zum Opt-in blockiert |
 | `digital-checkout.php` | Widerrufsrecht-Checkbox bei WooCommerce (nur wenn downloadbare Produkte im Warenkorb) |
 
 ### WooCommerce (zusätzlich)
