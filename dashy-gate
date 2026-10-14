@@ -3,7 +3,7 @@
 # Lässt genau drei Aufrufformen durch (ohne eval, ohne Shell):
 #   sudo -n /usr/local/sbin/dashy-sites
 #   sudo -n -u <siteuser> /usr/local/sbin/dashy-wp <domain> <args…>
-#   sudo -n /usr/local/sbin/dashy-wp-update <domain> plugin|theme|rollback <slug|snapshot-id>
+#   sudo -n /usr/local/sbin/dashy-wp-update <domain> plugin|theme|core|rollback|rollback-db <slug|version|snapshot-id>
 # Alles andere endet mit Exit 77. Damit gibt es für dashy keine freie Shell
 # (kein ps, kein cat, kein scp), auch wenn restrict in authorized_keys fehlt.
 set -euo pipefail
@@ -31,7 +31,7 @@ if [[ ${#ARGV[@]} -ge 6 && "${ARGV[0]}" == sudo && "${ARGV[1]}" == -n && "${ARGV
     exec sudo -n -u "${ARGV[3]}" /usr/local/sbin/dashy-wp "${ARGV[@]:5}"
 fi
 if [[ ${#ARGV[@]} -eq 6 && "${ARGV[0]}" == sudo && "${ARGV[1]}" == -n && "${ARGV[2]}" == /usr/local/sbin/dashy-wp-update \
-      && "${ARGV[4]}" =~ ^(plugin|theme|rollback)$ ]]; then
+      && "${ARGV[4]}" =~ ^(plugin|theme|core|rollback|rollback-db)$ ]]; then
     exec sudo -n /usr/local/sbin/dashy-wp-update "${ARGV[@]:3}"
 fi
 deny "form"

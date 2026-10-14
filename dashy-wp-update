@@ -1,26 +1,36 @@
 #!/usr/bin/env bash
-# dashy-wp-update — Einzel-Update eines Plugins oder Themes mit Snapshot und Rollback,
-# der erste und einzige Schreibpfad des Management-Dashboards "Dashy".
+# dashy-wp-update — Einzel-Update eines Plugins, Themes oder des WordPress-Cores mit Snapshot
+# und Rollback, der erste und einzige Schreibpfad des Management-Dashboards "Dashy".
 #
 # Aufruf (über sudoers, als root; der SSH-Weg führt über dashy-gate):
 #   sudo -n /usr/local/sbin/dashy-wp-update <domain> plugin|theme <slug>
-#   sudo -n /usr/local/sbin/dashy-wp-update <domain> rollback <snapshot-id>
+#   sudo -n /usr/local/sbin/dashy-wp-update <domain> core latest|<x.y.z>
+#   sudo -n /usr/local/sbin/dashy-wp-update <domain> rollback <snapshot-id>      (nur Dateien)
+#   sudo -n /usr/local/sbin/dashy-wp-update <domain> rollback-db <snapshot-id>   (Dateien und Datenbank)
 #
 # Zuschnitt (bewusst eng):
-#   - genau EIN Slug je Aufruf: kein --all, keine Installation, kein Core-Update
-#   - Snapshot vor dem Update: tar.gz des Plugin-/Theme-Verzeichnisses plus DB-Dump
-#     (als Site-User per `wp db export -`, kein Passwort in argv) unter
-#     /var/backups/wp-hosting/<domain>/dashy-<YYYYmmdd-HHMMSS>-<slug>/ (root 700),
+#   - genau EIN Slug je Aufruf: kein --all, keine Installation
+#   - Core nur auf eine Version, die `wp core check-update` anbietet (kein Downgrade, kein --force);
+#     `latest` nimmt die neueste; danach `wp core update-db`
+#   - Snapshot vor dem Update unter /var/backups/wp-hosting/<domain>/dashy-<YYYYmmdd-HHMMSS>-<slug>/
+#     (root 700): Plugin/Theme = tar.gz des Verzeichnisses; Core = tar.gz von wp-admin, wp-includes
+#     und den Root-Dateien, die `wp core update` anfasst (*.php außer wp-config.php, license.txt,
+#     readme.html); dazu immer ein DB-Dump (als Site-User per `wp db export -`, kein Passwort in argv).
 #     Retention: die letzten 5 Snapshots je Domain (je Domain, nicht je Slug)
 #   - Root fasst im Webroot NICHTS an: tar, mktemp, mv und rm dort laufen als Site-User
 #     (runuser), damit ein Symlink-Tausch durch den Site-User nie Root-Rechte bekommt;
 #     root schreibt und liest nur das Snapshot-Verzeichnis
 #   - Update als Site-User (runuser, env -i, erzwungenes --path, keine wp-cli-Config)
-#   - Smoke-Test danach: Status vorher = nachher, `core is-installed`, HTTP-Status der
-#     Startseite lokal über nginx (Host-Header), Versionsvergleich
-#   - Rollback: Verzeichnis aus dem tar zurück (als Site-User in Temp entpacken, Mitglieder
-#     vorher prüfen, dann mv-Tausch); funktioniert auch, wenn das Zielverzeichnis fehlt
-#     (abgebrochenes Update). Der DB-Dump bleibt liegen und wird im JSON genannt.
+#   - Smoke-Test danach: Status vorher = nachher (Plugin/Theme), `core is-installed`, HTTP-Status
+#     der Startseite lokal über nginx (Host-Header), Versionsvergleich
+#   - rollback: Dateien aus dem tar zurück (als Site-User in Temp entpacken, Mitglieder vorher
+#     prüfen, dann mv-Tausch); funktioniert auch, wenn das Zielverzeichnis fehlt (abgebrochenes
+#     Update). Der DB-Dump bleibt liegen und wird im JSON genannt. Core-Snapshots nur mit rollback-db,
+#     weil `wp core update-db` das Schema geändert hat.
+#   - rollback-db: erst ein zusätzlicher Dump des aktuellen Stands in das Snapshot-Verzeichnis
+#     (db-before-rollback-<ts>.sql.gz, im JSON als db_dump), dann Dateien wie bei rollback, dann
+#     `wp db import -` aus dem Dump des Snapshots (stdin, als Site-User). Inhalte seit dem Snapshot
+#     gehen verloren; Tabellen, die erst danach entstanden sind, bleiben stehen.
 #   - Ausgabe genau eine JSON-Zeile:
 #     {ok, kind, slug, old_version, new_version, snapshot, db_dump, smoke:{…}, error}
 #   - Ablehnung = Exit 77 ohne JSON; fehlgeschlagenes Update = Exit 1 mit JSON
@@ -47,6 +57,8 @@ SNAP_RE='^dashy-[0-9]{8}-[0-9]{6}-[A-Za-z0-9_][A-Za-z0-9_.-]{0,99}$'
 USER_RE='^[a-z_][a-z0-9_]{0,31}$'
 DOMAIN_RE='^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
 VERSION_RE='^[0-9A-Za-z.+_~-]{1,40}$'
+CORE_VER_RE='^[0-9]+(\.[0-9]+){1,2}$'
+CORE_FILE_RE='^[A-Za-z0-9_-]+\.(php|txt|html)$'
 STATUS_RE='^[a-z-]{1,20}$'
 
 # ── Helfer ──────────────────────────────────────────────────────────────────
@@ -76,14 +88,16 @@ deny() {  # deny <reason> — feste Gründe, keine Argumentwerte ins Log, nur An
 # ── Prüfung der Kommandozeile (reine Funktion, auch für --selftest) ────────
 # stdout: "<mode> <domain> <arg>" (ok) bzw. Grund ohne Argumentwerte (abgelehnt); Rückgabe 0/1.
 check_args() {
-    [[ $# -eq 3 ]] || { echo "genau drei argumente: <domain> plugin|theme|rollback <slug|snapshot-id>"; return 1; }
+    [[ $# -eq 3 ]] || { echo "genau drei argumente: <domain> plugin|theme|core|rollback|rollback-db <slug|version|snapshot-id>"; return 1; }
     local domain="$1" mode="$2" arg="$3"
     [[ -n "$domain" && -n "$mode" && -n "$arg" ]] || { echo "leeres argument"; return 1; }
     [[ "$domain" =~ $DOMAIN_RE && "$domain" != *..* && ${#domain} -le 253 ]] || { echo "ungültige domain"; return 1; }
     case "$mode" in
         plugin|theme)
             [[ "$arg" =~ $SLUG_RE && "$arg" != . && "$arg" != .. ]] || { echo "ungültiger slug"; return 1; } ;;
-        rollback)
+        core)
+            [[ "$arg" == latest || "$arg" =~ $CORE_VER_RE ]] || { echo "ungültige version"; return 1; } ;;
+        rollback|rollback-db)
             [[ "$arg" =~ $SNAP_RE ]] || { echo "ungültige snapshot-id"; return 1; } ;;
         *) echo "modus nicht erlaubt"; return 1 ;;
     esac
@@ -91,12 +105,37 @@ check_args() {
     return 0
 }
 
-# Archiv-Mitglieder: ausschließlich "<slug>" bzw. "<slug>/…", nie "..", nie absolut (reine Funktion)
+# Archiv-Mitglieder eines Plugin-/Theme-Snapshots: ausschließlich "<slug>" bzw. "<slug>/…",
+# nie "..", nie absolut (reine Funktion)
 check_members() {  # check_members <slug> <listing>
     local slug="$1" members="$2"
     [[ -n "$members" ]] || return 1
     grep -qE '(^|/)\.\.(/|$)|^/' <<<"$members" && return 1
     grep -qvE "^${slug//./\\.}(/|$)" <<<"$members" && return 1
+    return 0
+}
+
+# Archiv-Mitglieder eines Core-Snapshots (reine Funktion, wird vom Selftest unten geprüft).
+# Erlaubt sind genau die Pfade, die `wp core update` anfasst: "wp-admin", "wp-admin/…",
+# "wp-includes", "wp-includes/…" und Root-Dateien nach CORE_FILE_RE (kein Unterpfad), aber nie
+# wp-config.php. Beide Verzeichnisse müssen vorkommen; ".." und absolute Pfade sind tabu.
+# Rückgabe 0 = Archiv darf zurückgespielt werden, 1 = ablehnen.
+check_core_members() {  # check_core_members <listing>
+    local members="$1" m has_admin=0 has_includes=0
+    [[ -n "$members" ]] || return 1
+    while IFS= read -r m; do
+        [[ -n "$m" ]] || continue
+        [[ "$m" != /* ]] || return 1
+        [[ ! "$m" =~ (^|/)\.\.(/|$) ]] || return 1
+        case "$m" in
+            wp-admin|wp-admin/*)       has_admin=1 ;;
+            wp-includes|wp-includes/*) has_includes=1 ;;
+            wp-config.php)             return 1 ;;
+            */*)                       return 1 ;;   # Root-Datei mit Unterpfad (wp-content/…, sub/…)
+            *)                         [[ "$m" =~ $CORE_FILE_RE ]] || return 1 ;;
+        esac
+    done <<<"$members"
+    [[ $has_admin -eq 1 && $has_includes -eq 1 ]] || return 1
     return 0
 }
 
@@ -120,12 +159,25 @@ selftest() {
             printf '  FAIL  %-5s members %s: %s\n' "$want" "$2" "${3//$'\n'/ | }"; fails=$((fails+1))
         fi
     }
+    c() {  # c <erwartet: ok|deny> <listing>
+        local want="$1" rc=0; check_core_members "$2" || rc=1
+        if { [[ "$want" == ok && $rc -eq 0 ]] || [[ "$want" == deny && $rc -eq 1 ]]; }; then
+            printf '  ok    %-5s core-members: %s\n' "$want" "${2//$'\n'/ | }"
+        else
+            printf '  FAIL  %-5s core-members: %s\n' "$want" "${2//$'\n'/ | }"; fails=$((fails+1))
+        fi
+    }
     echo "dashy-wp-update selftest"
     t ok   example.com plugin two-factor
     t ok   example.com plugin Akismet_2.0
     t ok   example.com theme blocksy
+    t ok   example.com core latest
+    t ok   example.com core 7.1.3
+    t ok   example.com core 7.2
     t ok   example.com rollback dashy-20261012-181500-two-factor
     t ok   example.com rollback dashy-20261012-181500-blocksy
+    t ok   example.com rollback-db dashy-20261012-181500-two-factor
+    t ok   example.com rollback-db dashy-20261014-090000-core
     t deny example.com plugin
     t deny example.com plugin --all
     t deny example.com plugin "two-factor --all"
@@ -137,9 +189,18 @@ selftest() {
     t deny example.com plugin "a b"
     t deny example.com plugin ""
     t deny example.com core update
+    t deny example.com core 7
+    t deny example.com core 7.1.3.1
+    t deny example.com core "7.1.3 --force"
+    t deny example.com core --force
+    t deny example.com core v7.1.3
+    t deny example.com core 7.1.3-beta1
+    t deny example.com core ""
     t deny example.com plugin two-factor extra
     t deny example.com install two-factor
     t deny example.com update two-factor
+    t deny example.com rollbackdb dashy-20261012-181500-two-factor
+    t deny example.com db dashy-20261012-181500-two-factor
     t deny "example.com/.." plugin two-factor
     t deny "Example.com" plugin two-factor
     t deny "../etc" plugin two-factor
@@ -147,6 +208,9 @@ selftest() {
     t deny example.com rollback dashy-20261012-181500-../x
     t deny example.com rollback "dashy-20261012-181500-x y"
     t deny example.com rollback /var/backups/wp-hosting/x
+    t deny example.com rollback-db two-factor
+    t deny example.com rollback-db dashy-20261012-181500-../x
+    t deny example.com rollback-db /var/backups/wp-hosting/x
     t deny "" plugin two-factor
     m ok   two-factor $'two-factor/\ntwo-factor/readme.txt\ntwo-factor/inc/x.php'
     m ok   two-factor $'two-factor'
@@ -157,6 +221,21 @@ selftest() {
     m deny two-factor $'other/x'
     m deny two-factor ''
     m deny two.factor $'twoXfactor/x'
+    c ok   $'wp-admin/\nwp-admin/index.php\nwp-includes/\nwp-includes/version.php\nindex.php\nwp-login.php\nlicense.txt\nreadme.html'
+    c ok   $'wp-admin\nwp-includes\nindex.php'
+    c deny $'wp-admin/\nwp-admin/index.php\nindex.php'                       # wp-includes fehlt
+    c deny $'wp-includes/\nindex.php'                                         # wp-admin fehlt
+    c deny $'wp-admin/\nwp-includes/\nwp-config.php'
+    c deny $'wp-admin/\nwp-includes/\nwp-content/plugins/x.php'
+    c deny $'wp-admin/\nwp-includes/\nwp-content'
+    c deny $'wp-admin/\nwp-includes/\nwp-admin/../wp-config.php'
+    c deny $'wp-admin/\nwp-includes/\n../x.php'
+    c deny $'wp-admin/\nwp-includes/\n/etc/passwd'
+    c deny $'wp-admin/\nwp-includes/\n.htaccess'
+    c deny $'wp-admin/\nwp-includes/\nwp-admin-x/y.php'
+    c deny $'wp-admin/\nwp-includes/\nsub/index.php'
+    c deny $'wp-admin/\nwp-includes/\nindex.php.bak'
+    c deny ''
     echo "fehler: ${fails}"
     [[ $fails -eq 0 ]]
 }
@@ -200,6 +279,90 @@ fail() { OK=false; ERROR="$(clean "$1")"; emit 1; }
 # Unerwarteter Abbruch (set -e): trotzdem Logzeile und JSON
 trap 'rc=$?; [[ $rc -eq 0 || $rc -eq 1 || $rc -eq 77 ]] || { ERROR="unerwarteter abbruch (exit ${rc})"; OK=false; emit 1; }' EXIT
 
+# ── DB-Dump als Site-User nach stdout (Passwort bleibt bei wp-cli in MYSQL_PWD), gzip als root ──
+DUMP_MSG=""
+dump_db() {  # dump_db <ziel.sql.gz> — 0 = Dump vollständig, 1 = fehlgeschlagen (Ziel entfernt)
+    local target="$1" err rc tail_line
+    err=$(mktemp "$(dirname "$target")/.dberr.XXXXXX")
+    set +e
+    wp_user db export - --skip-plugins --skip-themes --single-transaction --quick --add-drop-table 2>"$err" | gzip > "$target"
+    rc=("${PIPESTATUS[@]}")
+    set -e
+    tail_line=$( { zcat "$target" 2>/dev/null | tail -n 1; } || true )
+    if [[ "${rc[0]}" -ne 0 || "${rc[1]}" -ne 0 ]] || ! gzip -t "$target" 2>/dev/null || [[ "$tail_line" != *"Dump completed"* ]]; then
+        DUMP_MSG="db-dump fehlgeschlagen (rc=${rc[0]}/${rc[1]}): $(grep -E 'Error|error|denied|failed' "$err" | head -1 || true)"
+        rm -f "$err" "$target"
+        return 1
+    fi
+    rm -f "$err"
+    chmod 600 "$target"
+    return 0
+}
+
+# ── Datei-Rollback eines Plugin-/Theme-Snapshots (alles im Webroot als Site-User) ──
+restore_item_files() {
+    local members tmp old_dir
+    # Listing erst in eine Variable: grep -q würde tar per SIGPIPE beenden und pipefail das Ergebnis kippen
+    members=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || fail "archiv nicht lesbar"
+    check_members "$SLUG" "$members" || fail "archiv enthält fremde pfade"
+    tmp=$(as_user mktemp -d -p "$PARENT" ".dashy-rollback.XXXXXX") || fail "temp-verzeichnis nicht anlegbar"
+    as_user tar -xzf - -C "$tmp" --no-same-owner --no-same-permissions < "${SNAP_DIR}/files.tar.gz" \
+        || { as_user rm -rf -- "$tmp"; fail "entpacken fehlgeschlagen"; }
+    [[ -d "${tmp}/${SLUG}" && ! -L "${tmp}/${SLUG}" ]] || { as_user rm -rf -- "$tmp"; fail "archiv ohne ${SLUG}/"; }
+    old_dir="${PARENT}/.dashy-old.${SLUG}.$$"
+    if [[ -e "$TARGET" ]]; then
+        as_user mv -T -- "$TARGET" "$old_dir" || { as_user rm -rf -- "$tmp"; fail "verzeichnis nicht verschiebbar"; }
+    fi
+    if ! as_user mv -T -- "${tmp}/${SLUG}" "$TARGET"; then
+        [[ -e "$old_dir" ]] && as_user mv -T -- "$old_dir" "$TARGET" || true
+        as_user rm -rf -- "$tmp"
+        fail "zurückkopieren fehlgeschlagen"
+    fi
+    as_user rm -rf -- "$tmp" "$old_dir" || true
+}
+
+# ── Datei-Rollback eines Core-Snapshots: wp-admin und wp-includes tauschen, Root-Dateien ersetzen ──
+restore_core_files() {
+    local members tmp suffix d f
+    members=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || fail "archiv nicht lesbar"
+    check_core_members "$members" || fail "archiv enthält fremde pfade"
+    tmp=$(as_user mktemp -d -p "$SITE_PATH" ".dashy-rollback.XXXXXX") || fail "temp-verzeichnis nicht anlegbar"
+    as_user tar -xzf - -C "$tmp" --no-same-owner --no-same-permissions < "${SNAP_DIR}/files.tar.gz" \
+        || { as_user rm -rf -- "$tmp"; fail "entpacken fehlgeschlagen"; }
+    for d in wp-admin wp-includes; do
+        [[ -d "${tmp}/${d}" && ! -L "${tmp}/${d}" ]] || { as_user rm -rf -- "$tmp"; fail "archiv ohne ${d}/"; }
+    done
+    suffix=".dashy-old.$$"
+    undo() {  # Verzeichnisse zurücktauschen, soweit schon getauscht; das Original liegt dann unter <d><suffix>
+        local x
+        for x in wp-admin wp-includes; do
+            if [[ -e "${SITE_PATH}/${x}${suffix}" ]]; then
+                as_user rm -rf -- "${SITE_PATH}/${x}" || true
+                as_user mv -T -- "${SITE_PATH}/${x}${suffix}" "${SITE_PATH}/${x}" || true
+            fi
+        done
+        as_user rm -rf -- "$tmp" || true
+    }
+    for d in wp-admin wp-includes; do
+        if [[ -e "${SITE_PATH}/${d}" ]]; then
+            as_user mv -T -- "${SITE_PATH}/${d}" "${SITE_PATH}/${d}${suffix}" || { undo; fail "${d} nicht verschiebbar"; }
+        fi
+        as_user mv -T -- "${tmp}/${d}" "${SITE_PATH}/${d}" || { undo; fail "${d} nicht zurückkopierbar"; }
+    done
+    # Root-Dateien einzeln ersetzen (nur reguläre Dateien aus dem Temp, Namen nach CORE_FILE_RE)
+    while IFS= read -r f; do
+        [[ -n "$f" && "$f" =~ $CORE_FILE_RE && "$f" != wp-config.php ]] || continue
+        as_user mv -f -T -- "${tmp}/${f}" "${SITE_PATH}/${f}" || fail "root-datei nicht ersetzbar"
+    done < <(find "$tmp" -mindepth 1 -maxdepth 1 -type f -printf '%f\n')
+    as_user rm -rf -- "$tmp" "${SITE_PATH}/wp-admin${suffix}" "${SITE_PATH}/wp-includes${suffix}" || true
+}
+
+# Root-Dateien, die `wp core update` anfasst: reguläre Dateien im Webroot, nie wp-config.php
+core_root_files() {
+    find "$SITE_PATH" -mindepth 1 -maxdepth 1 -type f \( -name '*.php' -o -name 'license.txt' -o -name 'readme.html' \) \
+        ! -name 'wp-config.php' -printf '%f\n' | sort
+}
+
 # ── Hauptprogramm ──────────────────────────────────────────────────────────
 if [[ "${1:-}" == "--selftest" ]]; then trap - EXIT; selftest; exit $?; fi
 ORIG_ARGS=("$@")
@@ -208,6 +371,7 @@ ORIG_ARGS=("$@")
 CHECK=$(check_args "$@") || deny "$CHECK"
 read -r MODE DOMAIN ARG <<<"$CHECK"
 LOG_DOMAIN="$DOMAIN"; LOG_CMD="update:${MODE}"
+TS=$(date +%Y%m%d-%H%M%S)
 
 SITE_FILE="${SITES_DIR}/${DOMAIN}.txt"
 [[ -f "$SITE_FILE" && ! -L "$SITE_FILE" ]] || deny "site unbekannt"
@@ -225,108 +389,161 @@ install -d -m 700 -o root -g root "$LOCK_DIR"
 exec 9>"${LOCK_DIR}/${DOMAIN}.lock"
 flock -n 9 || deny "läuft bereits"
 
-if [[ "$MODE" == rollback ]]; then
+if [[ "$MODE" == rollback || "$MODE" == rollback-db ]]; then
     SNAP_DIR="${BACKUP_ROOT}/${DOMAIN}/${ARG}"
     [[ -d "$SNAP_DIR" && ! -L "$SNAP_DIR" && "$(stat -c %u "$SNAP_DIR")" == 0 ]] || deny "snapshot fehlt"
     [[ -f "${SNAP_DIR}/meta" && -f "${SNAP_DIR}/files.tar.gz" ]] || deny "snapshot unvollständig"
     # meta (root-geschrieben): "kind=", "slug=", "status=" — trotzdem gegen die Muster geprüft
-    KIND=$(awk -F= '$1=="kind" && ($2=="plugin" || $2=="theme") {print $2; exit}' "${SNAP_DIR}/meta")
+    KIND=$(awk -F= '$1=="kind" && ($2=="plugin" || $2=="theme" || $2=="core") {print $2; exit}' "${SNAP_DIR}/meta")
     SLUG=$(awk -F= '$1=="slug" {print $2; exit}' "${SNAP_DIR}/meta")
     META_STATUS=$(awk -F= '$1=="status" {print $2; exit}' "${SNAP_DIR}/meta")
     [[ -n "$KIND" && "$SLUG" =~ $SLUG_RE && "$SLUG" != . && "$SLUG" != .. ]] || deny "snapshot-meta ungültig"
+    [[ "$KIND" != core || "$SLUG" == core ]] || deny "snapshot-meta ungültig"
     [[ "$META_STATUS" =~ $STATUS_RE ]] || META_STATUS=""
+    [[ "$KIND" != core || "$MODE" == rollback-db ]] || deny "core-snapshot nur mit rollback-db"
+    [[ "$MODE" != rollback-db ]] || [[ -f "${SNAP_DIR}/db.sql.gz" ]] || deny "snapshot ohne db-dump"
     SNAPSHOT="$SNAP_DIR"
     [[ -f "${SNAP_DIR}/db.sql.gz" ]] && DB_DUMP="${SNAP_DIR}/db.sql.gz"
+elif [[ "$MODE" == core ]]; then
+    KIND=core; SLUG=core
 else
     KIND="$MODE"; SLUG="$ARG"
 fi
-PARENT="${SITE_PATH}/wp-content/${KIND}s"
-TARGET="${PARENT}/${SLUG}"
-[[ -d "$PARENT" && ! -L "$PARENT" && "$(stat -c %u "$PARENT")" == "$SITE_UID" ]] || deny "${KIND}-verzeichnis fehlt oder fremder besitzer"
-if [[ "$MODE" != rollback ]]; then
-    [[ -d "$TARGET" && ! -L "$TARGET" ]] || deny "${KIND} nicht installiert"
-    [[ "$(stat -c %u "$TARGET")" == "$SITE_UID" ]] || deny "${KIND}-verzeichnis gehört nicht dem site-user"
+if [[ "$KIND" != core ]]; then
+    PARENT="${SITE_PATH}/wp-content/${KIND}s"
+    TARGET="${PARENT}/${SLUG}"
+    [[ -d "$PARENT" && ! -L "$PARENT" && "$(stat -c %u "$PARENT")" == "$SITE_UID" ]] || deny "${KIND}-verzeichnis fehlt oder fremder besitzer"
+    if [[ "$MODE" == plugin || "$MODE" == theme ]]; then
+        [[ -d "$TARGET" && ! -L "$TARGET" ]] || deny "${KIND} nicht installiert"
+        [[ "$(stat -c %u "$TARGET")" == "$SITE_UID" ]] || deny "${KIND}-verzeichnis gehört nicht dem site-user"
+    fi
+else
+    for d in wp-admin wp-includes; do
+        [[ -d "${SITE_PATH}/${d}" && ! -L "${SITE_PATH}/${d}" && "$(stat -c %u "${SITE_PATH}/${d}")" == "$SITE_UID" ]] \
+            || deny "${d} fehlt oder fremder besitzer"
+    done
 fi
 
-# ── Rollback ───────────────────────────────────────────────────────────────
-if [[ "$MODE" == rollback ]]; then
-    if [[ -e "$TARGET" ]]; then
+# ── Rollback (Dateien, bei rollback-db zusätzlich die Datenbank) ───────────
+if [[ "$MODE" == rollback || "$MODE" == rollback-db ]]; then
+    if [[ "$KIND" == core ]]; then
+        OLD_VERSION=$(wp_field core version)
+        STATUS_BEFORE="-"
+    elif [[ -e "$TARGET" ]]; then
         OLD_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
         STATUS_BEFORE=$(wp_field "$KIND" get "$SLUG" --field=status)
     else
         STATUS_BEFORE="fehlt"   # abgebrochenes Update: Verzeichnis ist weg, nur einsetzen
     fi
-    # Listing erst in eine Variable: grep -q würde tar per SIGPIPE beenden und pipefail das Ergebnis kippen
-    MEMBERS=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || fail "archiv nicht lesbar"
-    check_members "$SLUG" "$MEMBERS" || fail "archiv enthält fremde pfade"
-    # Alles im Webroot als Site-User: Temp anlegen, entpacken, tauschen, aufräumen
-    TMP=$(as_user mktemp -d -p "$PARENT" ".dashy-rollback.XXXXXX") || fail "temp-verzeichnis nicht anlegbar"
-    as_user tar -xzf - -C "$TMP" --no-same-owner --no-same-permissions < "${SNAP_DIR}/files.tar.gz" \
-        || { as_user rm -rf -- "$TMP"; fail "entpacken fehlgeschlagen"; }
-    [[ -d "${TMP}/${SLUG}" && ! -L "${TMP}/${SLUG}" ]] || { as_user rm -rf -- "$TMP"; fail "archiv ohne ${SLUG}/"; }
-    OLD_DIR="${PARENT}/.dashy-old.${SLUG}.$$"
-    if [[ -e "$TARGET" ]]; then
-        as_user mv -T -- "$TARGET" "$OLD_DIR" || { as_user rm -rf -- "$TMP"; fail "verzeichnis nicht verschiebbar"; }
+    if [[ "$MODE" == rollback-db ]]; then
+        # Sicherung des aktuellen Stands, bevor irgendetwas angefasst wird; liegt im Snapshot-Verzeichnis
+        BEFORE_DUMP="${SNAP_DIR}/db-before-rollback-${TS}.sql.gz"
+        [[ ! -e "$BEFORE_DUMP" ]] || fail "sicherungs-dump existiert schon"
+        dump_db "$BEFORE_DUMP" || fail "sicherung vor dem rollback: ${DUMP_MSG}"
+        DB_DUMP="$BEFORE_DUMP"
     fi
-    if ! as_user mv -T -- "${TMP}/${SLUG}" "$TARGET"; then
-        [[ -e "$OLD_DIR" ]] && as_user mv -T -- "$OLD_DIR" "$TARGET" || true
-        as_user rm -rf -- "$TMP"
-        fail "zurückkopieren fehlgeschlagen"
+    if [[ "$KIND" == core ]]; then restore_core_files; else restore_item_files; fi
+    if [[ "$MODE" == rollback-db ]]; then
+        set +e
+        IMP_OUT=$(zcat "${SNAP_DIR}/db.sql.gz" | wp_user db import - --skip-plugins --skip-themes 2>&1); IMP_RC=$?
+        set -e
+        [[ $IMP_RC -eq 0 ]] || fail "wp db import exit ${IMP_RC}: $(printf '%s' "$IMP_OUT" | grep -E 'Error|ERROR|denied' | head -1) — dateien sind zurückgespielt, sicherung: ${BEFORE_DUMP##*/}"
     fi
-    as_user rm -rf -- "$TMP" "$OLD_DIR" || true
     wp_user cache flush >/dev/null 2>&1 || true
-    NEW_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
-    STATUS_AFTER=$(wp_field "$KIND" get "$SLUG" --field=status)
+    if [[ "$KIND" == core ]]; then
+        NEW_VERSION=$(wp_field core version); STATUS_AFTER="-"
+    else
+        NEW_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
+        STATUS_AFTER=$(wp_field "$KIND" get "$SLUG" --field=status)
+    fi
     IS_INSTALLED=$( wp_user core is-installed >/dev/null 2>&1 && echo yes || echo no )
     HTTP=$(http_status)
-    EXPECT="${META_STATUS:-$STATUS_BEFORE}"
+    EXPECT="${META_STATUS:-$STATUS_BEFORE}"; [[ "$KIND" != core ]] || EXPECT="-"
     if [[ -n "$NEW_VERSION" && "$STATUS_AFTER" == "$EXPECT" && "$IS_INSTALLED" == yes && "$HTTP" =~ ^[23] ]]; then
         OK=true; emit 0
     fi
     fail "smoke-test nach rollback fehlgeschlagen (status ${STATUS_BEFORE}->${STATUS_AFTER}, erwartet ${EXPECT}, installed=${IS_INSTALLED}, http=${HTTP})"
 fi
 
-# ── Update ─────────────────────────────────────────────────────────────────
-OLD_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
-[[ -n "$OLD_VERSION" ]] || fail "${KIND} ${SLUG}: version nicht lesbar"
-STATUS_BEFORE=$(wp_field "$KIND" get "$SLUG" --field=status)
-# "update" gibt es nur bei list (get kennt das Feld nicht); --name filtert auf den Slug
-UPD=$(wp_field "$KIND" list --name="$SLUG" --field=update --format=csv)
-[[ "$UPD" == available ]] || fail "${KIND} ${SLUG}: kein update verfügbar (update=${UPD:-?})"
+# ── Update: Vorprüfung ─────────────────────────────────────────────────────
+TARGET_VERSION=""
+if [[ "$KIND" == core ]]; then
+    OLD_VERSION=$(wp_field core version)
+    [[ "$OLD_VERSION" =~ $CORE_VER_RE ]] || fail "core: version nicht lesbar"
+    STATUS_BEFORE="-"
+    # Nur Versionen, die WordPress selbst anbietet: kein Downgrade, kein --force, kein Nightly
+    AVAIL=$( { wp_user core check-update --fields=version --format=csv 2>/dev/null | tail -n +2 | grep -E "$CORE_VER_RE"; } || true )
+    [[ -n "$AVAIL" ]] || fail "core: kein update verfügbar (${OLD_VERSION})"
+    if [[ "$ARG" != latest ]]; then
+        grep -qxF "$ARG" <<<"$AVAIL" || fail "core: version ${ARG} wird nicht angeboten (verfügbar: $(tr '\n' ' ' <<<"$AVAIL"))"
+        TARGET_VERSION="$ARG"
+    fi
+else
+    OLD_VERSION=$(wp_field "$KIND" get "$SLUG" --field=version)
+    [[ -n "$OLD_VERSION" ]] || fail "${KIND} ${SLUG}: version nicht lesbar"
+    STATUS_BEFORE=$(wp_field "$KIND" get "$SLUG" --field=status)
+    # "update" gibt es nur bei list (get kennt das Feld nicht); --name filtert auf den Slug
+    UPD=$(wp_field "$KIND" list --name="$SLUG" --field=update --format=csv)
+    [[ "$UPD" == available ]] || fail "${KIND} ${SLUG}: kein update verfügbar (update=${UPD:-?})"
+fi
 
-# Snapshot (root schreibt nur hier; der Site-User liefert tar und Dump über stdout)
+# ── Snapshot (root schreibt nur hier; der Site-User liefert tar und Dump über stdout) ──
 install -d -m 700 -o root -g root "$BACKUP_ROOT" "${BACKUP_ROOT}/${DOMAIN}"
 FREE_KB=$(df --output=avail -k "$BACKUP_ROOT" | tail -n 1 | tr -d ' ')
 [[ "$FREE_KB" =~ ^[0-9]+$ && "$FREE_KB" -ge "$MIN_FREE_KB" ]] || fail "zu wenig platz unter ${BACKUP_ROOT} (${FREE_KB:-?} kB frei)"
-TS=$(date +%Y%m%d-%H%M%S)
 SNAP_DIR="${BACKUP_ROOT}/${DOMAIN}/dashy-${TS}-${SLUG}"
 [[ ! -e "$SNAP_DIR" ]] || fail "snapshot-verzeichnis existiert schon"
 mkdir -m 700 "$SNAP_DIR"
 printf 'kind=%s\nslug=%s\nold_version=%s\nstatus=%s\nts=%s\n' "$KIND" "$SLUG" "$(safe "$OLD_VERSION" "$VERSION_RE")" "$(safe "$STATUS_BEFORE" "$STATUS_RE")" "$TS" > "${SNAP_DIR}/meta"
-if ! as_user tar -czf - -C "$PARENT" -- "$SLUG" > "${SNAP_DIR}/files.tar.gz" 2>/dev/null; then
-    rm -rf "$SNAP_DIR"; fail "datei-snapshot fehlgeschlagen"
+if [[ "$KIND" == core ]]; then
+    mapfile -t ROOT_FILES < <(core_root_files)
+    for f in "${ROOT_FILES[@]}"; do [[ "$f" =~ $CORE_FILE_RE ]] || { rm -rf "$SNAP_DIR"; fail "root-datei mit unerwartetem namen"; }; done
+    if ! as_user tar -czf - -C "$SITE_PATH" -- wp-admin wp-includes "${ROOT_FILES[@]}" > "${SNAP_DIR}/files.tar.gz" 2>/dev/null; then
+        rm -rf "$SNAP_DIR"; fail "datei-snapshot fehlgeschlagen"
+    fi
+    MEMBERS=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || MEMBERS=""
+    check_core_members "$MEMBERS" || { rm -rf "$SNAP_DIR"; fail "datei-snapshot unbrauchbar"; }
+else
+    if ! as_user tar -czf - -C "$PARENT" -- "$SLUG" > "${SNAP_DIR}/files.tar.gz" 2>/dev/null; then
+        rm -rf "$SNAP_DIR"; fail "datei-snapshot fehlgeschlagen"
+    fi
+    MEMBERS=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || MEMBERS=""
+    check_members "$SLUG" "$MEMBERS" || { rm -rf "$SNAP_DIR"; fail "datei-snapshot unbrauchbar"; }
 fi
-MEMBERS=$(tar -tzf "${SNAP_DIR}/files.tar.gz" 2>/dev/null) || MEMBERS=""
-check_members "$SLUG" "$MEMBERS" || { rm -rf "$SNAP_DIR"; fail "datei-snapshot unbrauchbar"; }
-# DB-Dump als Site-User nach stdout (Passwort bleibt bei wp-cli in MYSQL_PWD, nie in argv), gzip als root
-DB_ERR=$(mktemp "${SNAP_DIR}/.dberr.XXXXXX")
-set +e
-wp_user db export - --skip-plugins --skip-themes --single-transaction --quick --add-drop-table 2>"$DB_ERR" | gzip > "${SNAP_DIR}/db.sql.gz"
-DB_RC=("${PIPESTATUS[@]}")
-set -e
-DB_TAIL=$( { zcat "${SNAP_DIR}/db.sql.gz" 2>/dev/null | tail -n 1; } || true )
-if [[ "${DB_RC[0]}" -ne 0 || "${DB_RC[1]}" -ne 0 ]] || ! gzip -t "${SNAP_DIR}/db.sql.gz" 2>/dev/null || [[ "$DB_TAIL" != *"Dump completed"* ]]; then
-    MSG=$(grep -E 'Error|error|denied|failed' "$DB_ERR" | head -1 || true)
-    rm -rf "$SNAP_DIR"; fail "db-dump fehlgeschlagen (rc=${DB_RC[0]}/${DB_RC[1]}): ${MSG}"
-fi
-rm -f "$DB_ERR"
+dump_db "${SNAP_DIR}/db.sql.gz" || { rm -rf "$SNAP_DIR"; fail "$DUMP_MSG"; }
 chmod 600 "${SNAP_DIR}"/*
 SNAPSHOT="$SNAP_DIR"; DB_DUMP="${SNAP_DIR}/db.sql.gz"
 # Retention: die letzten KEEP Snapshots je Domain (Namen sortieren chronologisch)
 mapfile -t OLD_SNAPS < <(find "${BACKUP_ROOT}/${DOMAIN}" -mindepth 1 -maxdepth 1 -type d -name 'dashy-*' -printf '%f\n' | sort | head -n -"$KEEP")
 for s in "${OLD_SNAPS[@]}"; do rm -rf "${BACKUP_ROOT:?}/${DOMAIN:?}/${s:?}"; done
 
-# Update
+# ── Update ─────────────────────────────────────────────────────────────────
+if [[ "$KIND" == core ]]; then
+    UPD_ARGS=(core update); [[ -z "$TARGET_VERSION" ]] || UPD_ARGS+=("--version=${TARGET_VERSION}")
+    set +e
+    UPD_OUT=$(wp_user "${UPD_ARGS[@]}" 2>&1); UPD_RC=$?
+    set -e
+    NEW_VERSION=$(wp_field core version)
+    if [[ $UPD_RC -ne 0 ]]; then
+        fail "wp core update exit ${UPD_RC}: $(printf '%s' "$UPD_OUT" | grep -E 'Error|Warning' | head -2 | tr '\n' ' ') — rollback-db: ${SNAP_DIR##*/}"
+    fi
+    [[ "$NEW_VERSION" != "$OLD_VERSION" ]] || fail "version unverändert (${OLD_VERSION}): $(printf '%s' "$UPD_OUT" | grep -E 'Error|Warning|Success' | head -1)"
+    [[ -z "$TARGET_VERSION" || "$NEW_VERSION" == "$TARGET_VERSION" ]] || fail "version ${NEW_VERSION} statt ${TARGET_VERSION} — rollback-db: ${SNAP_DIR##*/}"
+    # Schema nachziehen; ohne diesen Schritt läuft WordPress nach einem Major-Release mit alter db_version
+    set +e
+    DBU_OUT=$(wp_user core update-db 2>&1); DBU_RC=$?
+    set -e
+    STATUS_AFTER="-"
+    wp_user cache flush >/dev/null 2>&1 || true
+    IS_INSTALLED=$( wp_user core is-installed >/dev/null 2>&1 && echo yes || echo no )
+    HTTP=$(http_status)
+    [[ $DBU_RC -eq 0 ]] || fail "wp core update-db exit ${DBU_RC}: $(printf '%s' "$DBU_OUT" | grep -E 'Error|Warning' | head -1) — rollback-db: ${SNAP_DIR##*/}"
+    if [[ "$IS_INSTALLED" != yes || ! "$HTTP" =~ ^[23] ]]; then
+        fail "smoke-test fehlgeschlagen (installed=${IS_INSTALLED}, http=${HTTP}) — rollback-db: ${SNAP_DIR##*/}"
+    fi
+    OK=true; emit 0
+fi
+
 set +e
 UPD_OUT=$(wp_user "$KIND" update "$SLUG" 2>&1); UPD_RC=$?
 set -e
