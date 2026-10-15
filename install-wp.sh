@@ -1305,6 +1305,46 @@ add_filter('faz_blocking_rules_client', function ($providers) {
 });
 MUPLUGIN
 
+# AdSense Auto-Ads (nur Blogs) + Microsoft Clarity: beide lesen ihre ID aus einer Option, die das
+# Provisioning setzt (wph_adsense_pub_id, wph_clarity_project_id) — ohne Option bleibt alles still.
+# Shops bekommen Clarity ueber den Pixel Manager, nicht hierueber (sonst doppelt). FAZ blockt beide
+# Scripts bis zum Opt-in (AdSense: marketing, Clarity: analytics). ads.txt schreibt das Provisioning.
+cat > "${SITE_PATH}/wp-content/mu-plugins/wph-tracking-ids.php" <<'MUPLUGIN'
+<?php
+/**
+ * Plugin Name: Tracking-IDs (AdSense Auto-Ads, Microsoft Clarity)
+ * Description: Bindet AdSense bzw. Clarity ein, sobald das Provisioning die jeweilige ID als Option gesetzt hat; FAZ blockt bis zum Cookie-Opt-in.
+ */
+function wph_adsense_pub_id() {
+    $v = get_option('wph_adsense_pub_id');
+    return (is_string($v) && preg_match('/^pub-[0-9]{10,20}$/', $v)) ? $v : '';
+}
+function wph_clarity_project_id() {
+    $v = get_option('wph_clarity_project_id');
+    return (is_string($v) && preg_match('/^[a-z0-9]{6,24}$/', $v)) ? $v : '';
+}
+add_action('wp_head', function () {
+    $pub = wph_adsense_pub_id();
+    if ($pub) {
+        echo '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-' . $pub . '" crossorigin="anonymous"></script>' . "\n";
+    }
+    $cl = wph_clarity_project_id();
+    if ($cl) {
+        echo '<script>(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","' . $cl . '");</script>' . "\n";
+    }
+}, 20);
+add_filter('faz_blocking_rules', function ($map) {
+    if (wph_adsense_pub_id())      { $map['pagead2.googlesyndication.com'] = 'marketing'; }
+    if (wph_clarity_project_id())  { $map['clarity.ms'] = 'analytics'; }
+    return $map;
+});
+add_filter('faz_blocking_rules_client', function ($providers) {
+    if (wph_adsense_pub_id())      { $providers['pagead2.googlesyndication.com'] = array('marketing'); }
+    if (wph_clarity_project_id())  { $providers['clarity.ms'] = array('analytics'); }
+    return $providers;
+});
+MUPLUGIN
+
 cat > "${SITE_PATH}/wp-content/mu-plugins/server-cache.php" <<'MUPLUGIN'
 <?php
 /**

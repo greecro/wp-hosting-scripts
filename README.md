@@ -259,6 +259,7 @@ sudo bash maintenance.sh
 | `performance.php` | Heartbeat drosseln, Admin-Bar ausblenden, Author-Enumeration blockieren |
 | `maintenance-mode.php` | Maintenance Mode (Flag-Datei `/wp-content/.maintenance-active`) |
 | `eazyanalytics-pixel.php` | eazyanalytics-Tracking, sobald das Provisioning Pixel-Host + Key als Optionen gesetzt hat; vom Cookie-Consent (Kategorie `analytics`) bis zum Opt-in blockiert |
+| `wph-tracking-ids.php` | AdSense Auto-Ads (Option `wph_adsense_pub_id`, Blogs) und Microsoft Clarity (Option `wph_clarity_project_id`); IDs setzt das Provisioning, FAZ blockt bis zum Opt-in (marketing/analytics). Shops bekommen Clarity über den Pixel Manager |
 | `digital-checkout.php` | Widerrufsrecht-Checkbox bei WooCommerce (nur wenn downloadbare Produkte im Warenkorb) |
 
 ### WooCommerce (zusätzlich)
