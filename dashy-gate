@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # dashy-gate — ForceCommand für den SSH-User "dashy".
-# Lässt genau drei Aufrufformen durch (ohne eval, ohne Shell):
+# Lässt genau vier Aufrufformen durch (ohne eval, ohne Shell):
 #   sudo -n /usr/local/sbin/dashy-sites
 #   sudo -n -u <siteuser> /usr/local/sbin/dashy-wp <domain> <args…>
+#   sudo -n -u <siteuser> /usr/local/sbin/dashy-wc <domain> daily|status|top-products [--days=N]
 #   sudo -n /usr/local/sbin/dashy-wp-update <domain> plugin|theme|core|rollback|rollback-db <slug|version|snapshot-id>
 # Alles andere endet mit Exit 77. Damit gibt es für dashy keine freie Shell
 # (kein ps, kein cat, kein scp), auch wenn restrict in authorized_keys fehlt.
@@ -29,6 +30,12 @@ if [[ ${#ARGV[@]} -ge 6 && "${ARGV[0]}" == sudo && "${ARGV[1]}" == -n && "${ARGV
       && "${ARGV[3]}" =~ ^[a-z_][a-z0-9_]{0,31}$ && "${ARGV[3]}" != root \
       && "${ARGV[4]}" == /usr/local/sbin/dashy-wp ]]; then
     exec sudo -n -u "${ARGV[3]}" /usr/local/sbin/dashy-wp "${ARGV[@]:5}"
+fi
+if [[ ( ${#ARGV[@]} -eq 7 || ${#ARGV[@]} -eq 8 ) && "${ARGV[0]}" == sudo && "${ARGV[1]}" == -n && "${ARGV[2]}" == -u \
+      && "${ARGV[3]}" =~ ^[a-z_][a-z0-9_]{0,31}$ && "${ARGV[3]}" != root \
+      && "${ARGV[4]}" == /usr/local/sbin/dashy-wc && "${ARGV[6]}" =~ ^(daily|status|top-products)$ \
+      && ( ${#ARGV[@]} -eq 7 || "${ARGV[7]}" =~ ^--days=[1-9][0-9]?$ ) ]]; then
+    exec sudo -n -u "${ARGV[3]}" /usr/local/sbin/dashy-wc "${ARGV[@]:5}"
 fi
 if [[ ${#ARGV[@]} -eq 6 && "${ARGV[0]}" == sudo && "${ARGV[1]}" == -n && "${ARGV[2]}" == /usr/local/sbin/dashy-wp-update \
       && "${ARGV[4]}" =~ ^(plugin|theme|core|rollback|rollback-db)$ ]]; then

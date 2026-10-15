@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# dashy-wc — Read-only-Reports aus WooCommerce für das Management-Dashboard "Dashy"
+# (Business-Cockpit). Feste SQL auf die Woo-Admin-Statistiktabellen, keine SQL von außen.
+#
+# Aufruf (über sudoers, als Site-User; der SSH-Weg führt über dashy-gate):
+#   sudo -n -u <siteuser> /usr/local/sbin/dashy-wc <domain> <report> [--days=N]
+#
+# Reports (N = 1..90):
+#   daily         Tagesreihe der letzten N Tage (Standard 35): Bestellungen, Artikel,
+#                 Umsatz netto/brutto, Erstattungen (Anzahl, Betrag netto)
+#   status        Anzahl Bestellungen je Status (ohne Zeitfenster, ohne Erstattungszeilen)
+#   top-products  Top 5 Produkte nach Nettoumsatz der letzten N Tage (Standard 30)
+#
+# Definitionen (wie Woo-Admin → Analytics): Umsatz = Summe über die Status processing,
+# on-hold, completed und refunded; Erstattungen sind eigene Zeilen in wc_order_stats
+# (parent_id > 0, negative Beträge) und mindern den Umsatz am Tag der Erstattung.
+# net = ohne Steuer und Versand (net_total), gross = inklusive (total_sales).
+# Tage nach der Site-Zeitzone (install-wp.sh setzt Europe/Berlin), Spalte date_created.
+#
+# Sicherheitsmodell:
+#   - läuft als Site-User (sudo wählt ihn), prüft, dass dieser /var/www/<domain> besitzt
+#   - genau ein Report je Aufruf, Flags nur --days=N; alles andere: Exit 77
+#   - SQL steht fest hier im Script; Tabellenpräfix aus `wp db prefix`, geprüft gegen [A-Za-z0-9_]
+#   - `wp db query` als Site-User mit den Zugangsdaten der Site (wp-config.php), Passwort
+#     über MYSQL_PWD (nie in argv), env -i, keine wp-cli-Config, keine Packages
+#   - Ausgabe genau eine JSON-Zeile; Fehlertext nur der mysql-Fehlerkopf (nie SQL-Freitext)
+#   - stderr getrennt (600-Tempdatei), `timeout 30`, Sitzung READ ONLY mit max_statement_time
+#   - jede Ausführung und jede Ablehnung als Zeile in journald (logger -t dashy)
+#
+# Ausgabe: {"ok":true|false,"report":"…","days":N,"today":"YYYY-MM-DD","currency":"EUR","data":…,"error":"…"}
+# Exit 0 ok, 1 fehlgeschlagen (mit JSON), 77 abgelehnt (ohne JSON).
+set -euo pipefail
+
+WP_BIN="/usr/local/bin/wp"
+WWW_ROOT="/var/www"
+EXIT_DENIED=77
+SITE_TZ="Europe/Berlin"
+REPORTS="daily status top-products"
+DAYS_MAX=90
+TOP_LIMIT=5
+MAX_OUT=200000
+# Status, die als Umsatz zählen (Woo-Admin: alles außer pending, failed, cancelled, draft)
+STATUS_SET="'wc-processing','wc-on-hold','wc-completed','wc-refunded'"
+
+# ── Helfer ──────────────────────────────────────────────────────────────────
+in_list() { local needle="$1"; shift; local x; for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done; return 1; }
+now_ms() { local us="${EPOCHREALTIME:-0.0}"; us="${us/./}"; echo $(( 10#${us} / 1000 )); }
+json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\t'/\\t}"; s="${s//$'\n'/\\n}"; s="${s//$'\r'/}"; printf '%s' "$s"; }
+
+# Fehlermeldung fürs JSON: NUR der mysql-Fehlercode oder ein fester wp-cli-Kopf, nie Freitext (zitiert Werte, Passwörter in Klammern)
+wp_msg() {
+    local o
+    o=$(printf '%s' "$1" | grep -oE '^Error: [A-Za-z0-9 .,-]{1,80}' | head -1) \
+        || o=$(printf '%s' "$1" | grep -oE '^Warning: [A-Za-z0-9 .,-]{1,80}' | head -1) || o=""
+    printf '%s' "$o"
+}
+sql_code() { printf '%s' "$1" | grep -oE 'ERROR [0-9]{4} \([0-9A-Z]{5}\)( at line [0-9]+)?' | head -1 || true; }
+err_text() {  # err_text <stderr+stdout> → fester Text
+    local e; e=$(sql_code "$1"); [[ -n "$e" ]] || e=$(wp_msg "$1"); [[ -n "$e" ]] || e="wp db query fehlgeschlagen"
+    printf '%s' "$e"
+}
+check_domain() { [[ "$1" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ && "$1" != *..* ]]; }
+check_prefix() { [[ "$1" =~ ^[A-Za-z0-9_]{1,24}$ ]]; }
+# Datenzelle: JSON-Objekt oder -Array, eine Zeile, keine Steuerzeichen (auch Tab/ESC), begrenzte Länge. Rückgabe: Grund oder leer.
+check_data() {
+    local d="$1"
+    (( ${#d} <= MAX_OUT )) || { echo "Ausgabe zu groß"; return; }
+    [[ "$d" == *$'\n'* ]] && { echo "Ausgabeformat unerwartet"; return; }
+    [[ "$d" =~ [[:cntrl:]] ]] && { echo "Datenformat unerwartet"; return; }
+    local re='^[[{].*[]}]$'
+    [[ "$d" =~ $re ]] || { echo "Datenformat unerwartet"; return; }
+    echo ""
+}
+
+LOG_DOMAIN="-"
+log_line() {  # log_line <exit> <ms> <reason> <cmd-feld>
+    logger -t dashy -p auth.info -- \
+        "site=${LOG_DOMAIN} caller=${SUDO_USER:-?} runas=$(id -un) exit=$1 ms=$2 reason=$3 cmd=wc:$4" 2>/dev/null || true
+}
+deny() {  # deny <reason> <args…>  — ohne Argumentwerte ins Log
+    local reason="$1"; shift
+    local first="${1:-}" n=$# h
+    [[ "$first" =~ ^[A-Za-z0-9_-]{0,32}$ ]] || first="?"
+    h=$(printf '%s\0' "$@" | sha256sum | cut -c1-12)
+    log_line "$EXIT_DENIED" 0 "$reason" "${first} argc=${n} sha=${h}"
+    echo "dashy-wc: abgelehnt (${reason})" >&2
+    exit "$EXIT_DENIED"
+}
+
+# ── Prüfung der Kommandozeile (reine Funktion, auch für --selftest) ────────
+# stdout: "<report> <days>" (ok) bzw. Grund (abgelehnt); Rückgabe 0/1.
+check_args() {
+    local report="${1:-}" a days="" key val
+    [[ $# -ge 1 ]] || { echo "kein report"; return 1; }
+    # shellcheck disable=SC2086
+    in_list "$report" $REPORTS || { echo "report nicht in allowlist"; return 1; }
+    shift
+    for a in "$@"; do
+        [[ -n "$a" ]] || { echo "leeres argument"; return 1; }
+        [[ "$a" == --* ]] || { echo "positional nicht erlaubt"; return 1; }
+        key="${a%%=*}"; val=""; [[ "$a" == *=* ]] && val="${a#*=}"
+        [[ "$key" == --days ]] || { echo "flag ${key} nicht erlaubt"; return 1; }
+        [[ -z "$days" ]] || { echo "--days doppelt"; return 1; }
+        [[ "$val" =~ ^[1-9][0-9]?$ ]] && (( 10#$val <= DAYS_MAX )) || { echo "--days: 1..${DAYS_MAX} erwartet"; return 1; }
+        days="$val"
+    done
+    case "$report" in
+        daily)        : "${days:=35}" ;;
+        top-products) : "${days:=30}" ;;
+        status)       [[ -z "$days" ]] || { echo "status: --days nicht erlaubt"; return 1; }; days=0 ;;
+    esac
+    echo "$report $days"
+    return 0
+}
+
+# ── SQL je Report (P = Präfix, FROM = erster Tag) ───────────────────────────
+sql_prelude() { printf 'SET SESSION TRANSACTION READ ONLY; SET SESSION max_statement_time=20;'; }
+sql_for() {  # sql_for <report> <prefix> <from-date>
+    local r="$1" P="$2" FROM="$3"
+    case "$r" in
+        daily) cat <<EOF
+SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('day', d, 'orders', orders, 'items', items, 'net', net, 'gross', gross, 'refunds', refunds, 'refunds_net', refunds_net) ORDER BY d), JSON_ARRAY())
+FROM (
+  SELECT DATE(date_created) AS d,
+         SUM(parent_id = 0) AS orders,
+         SUM(CASE WHEN parent_id = 0 THEN num_items_sold ELSE 0 END) AS items,
+         ROUND(SUM(net_total), 2) AS net,
+         ROUND(SUM(total_sales), 2) AS gross,
+         SUM(parent_id > 0) AS refunds,
+         ROUND(-SUM(CASE WHEN parent_id > 0 THEN net_total ELSE 0 END), 2) AS refunds_net
+  FROM ${P}wc_order_stats
+  WHERE status IN (${STATUS_SET}) AND date_created >= '${FROM} 00:00:00'
+  GROUP BY DATE(date_created)
+) t
+EOF
+        ;;
+        status) cat <<EOF
+SELECT COALESCE(JSON_OBJECTAGG(status, n), JSON_OBJECT())
+FROM (
+  SELECT status, COUNT(*) AS n FROM ${P}wc_order_stats
+  WHERE parent_id = 0 AND status LIKE 'wc-%' GROUP BY status
+) t
+EOF
+        ;;
+        top-products) cat <<EOF
+SELECT COALESCE(JSON_ARRAYAGG(JSON_OBJECT('id', product_id, 'name', name, 'qty', qty, 'net', net) ORDER BY net DESC), JSON_ARRAY())
+FROM (
+  SELECT l.product_id, LEFT(COALESCE(p.post_title, ''), 120) AS name,
+         SUM(l.product_qty) AS qty, ROUND(SUM(l.product_net_revenue), 2) AS net
+  FROM ${P}wc_order_product_lookup l
+  JOIN ${P}wc_order_stats s ON s.order_id = l.order_id
+  LEFT JOIN ${P}posts p ON p.ID = l.product_id
+  WHERE s.parent_id = 0 AND s.status IN (${STATUS_SET}) AND s.date_created >= '${FROM} 00:00:00'
+  GROUP BY l.product_id, p.post_title
+  ORDER BY net DESC LIMIT ${TOP_LIMIT}
+) t
+EOF
+        ;;
+    esac
+}
+
+selftest() {
+    local fails=0
+    t() {  # t <erwartet: ok|deny> <args…>
+        local want="$1"; shift
+        local out rc=0
+        out=$(check_args "$@") || rc=1
+        if { [[ "$want" == ok && $rc -eq 0 ]] || [[ "$want" == deny && $rc -eq 1 ]]; }; then
+            printf '  ok    %-5s %s  -> %s\n' "$want" "$*" "$out"
+        else
+            printf '  FAIL  %-5s %s  -> %s\n' "$want" "$*" "$out"; fails=$((fails+1))
+        fi
+    }
+    echo "dashy-wc selftest"
+    t ok   daily
+    t ok   daily --days=35
+    t ok   daily --days=1
+    t ok   daily --days=90
+    t ok   status
+    t ok   top-products
+    t ok   top-products --days=7
+    t deny daily --days=0
+    t deny daily --days=91
+    t deny daily --days=007
+    t deny daily --days=
+    t deny daily --days
+    t deny daily --days=7 --days=8
+    t deny daily 7
+    t deny daily --format=json
+    t deny daily --path=/var/www/other
+    t deny status --days=7
+    t deny summary
+    t deny ""
+    t deny daily ""
+    t deny -h
+    t deny daily --days=09
+    t deny daily --days=+5
+    t deny daily --days=1e1
+    t deny daily --days=5=
+    t deny daily --DAYS=5
+    t deny daily "--days=5 "
+    t deny daily --days=٥
+    # Fehlertexte: nie Freitext, nie Werte
+    e() {  # e <erwartet> <funktion> <eingabe>
+        local got; got=$("$2" "$3")
+        if [[ "$got" == "$1" ]]; then printf '  ok    %s -> %s\n' "$2" "$got"
+        else printf '  FAIL  %s -> %s (erwartet %s)\n' "$2" "$got" "$1"; fails=$((fails+1)); fi
+    }
+    e "ERROR 1146 (42S02) at line 1" err_text "ERROR 1146 (42S02) at line 1: Table 'wp_x.wp_wc_order_stats' doesn't exist"
+    e "ERROR 1064 (42000) at line 1" err_text "ERROR 1064 (42000) at line 1: You have an error in your SQL syntax near 'DUMMYSECRET'"
+    e "Error: Database connection error " err_text "Error: Database connection error (DUMMYSECRET)"
+    e "Error: Error establishing a database connection" err_text $'Warning: Undefined constant DUMMYSECRET\nError: Error establishing a database connection'
+    e "wp db query fehlgeschlagen" err_text "PHP Warning: DUMMYSECRET in /var/www/x/wp-config.php"
+    e "wp db query fehlgeschlagen" err_text $'\x1bDUMMYSECRET'
+    e "" check_data '[{"a":1}]'
+    e "" check_data '{}'
+    e "Datenformat unerwartet" check_data $'[{"a":"x\ty"}]'
+    e "Datenformat unerwartet" check_data $'[{"a":"\x1b"}]'
+    e "Datenformat unerwartet" check_data $'[{"a":"\x01"}]'
+    e "Ausgabeformat unerwartet" check_data $'[{"a":1}\n]'
+    e "Datenformat unerwartet" check_data '[{"a":1'
+    e "Datenformat unerwartet" check_data 'NULL'
+    e "Ausgabe zu groß" check_data "$(printf '[%*s]' $((MAX_OUT + 1)) '')"
+    for d in example.com shop.example a-b.co.uk; do check_domain "$d" && echo "  ok    domain $d" || { echo "  FAIL  domain $d"; fails=$((fails+1)); }; done
+    for d in ../x A.de -x.de a..b x.de/ "" "a b"; do check_domain "$d" && { echo "  FAIL  domain '$d' akzeptiert"; fails=$((fails+1)); } || echo "  ok    deny domain '$d'"; done
+    for pfx in wp_ wp_abc123_ a; do check_prefix "$pfx" && echo "  ok    prefix $pfx" || { echo "  FAIL  prefix $pfx"; fails=$((fails+1)); }; done
+    for pfx in "wp_;DROP" wp- "" "$(printf 'x%.0s' {1..25})" "wp "; do check_prefix "$pfx" && { echo "  FAIL  prefix '$pfx' akzeptiert"; fails=$((fails+1)); } || echo "  ok    deny prefix '$pfx'"; done
+    # SQL-Vertrag: Präfix und Datum landen nur an den vorgesehenen Stellen
+    local s; s=$(sql_for daily wp_ 2026-01-01)
+    [[ "$s" == *"wp_wc_order_stats"* && "$s" == *"'2026-01-01 00:00:00'"* ]] && echo "  ok    sql daily" || { echo "  FAIL  sql daily"; fails=$((fails+1)); }
+    s=$(sql_for top-products wp_ 2026-01-01)
+    [[ "$s" == *"LIMIT ${TOP_LIMIT}"* && "$s" == *"wp_posts"* ]] && echo "  ok    sql top-products" || { echo "  FAIL  sql top-products"; fails=$((fails+1)); }
+    s=$(sql_for status wp_ 2026-01-01)
+    [[ "$s" == *"JSON_OBJECTAGG"* && "$s" != *"2026-01-01"* ]] && echo "  ok    sql status" || { echo "  FAIL  sql status"; fails=$((fails+1)); }
+    local pre; pre=$(sql_prelude)
+    [[ "$pre" == *"READ ONLY"* && "$pre" == *"max_statement_time"* ]] && echo "  ok    sql prelude" || { echo "  FAIL  sql prelude"; fails=$((fails+1)); }
+    echo "fehler: ${fails}"
+    [[ $fails -eq 0 ]]
+}
+
+# ── Hauptprogramm ──────────────────────────────────────────────────────────
+if [[ "${1:-}" == "--selftest" ]]; then selftest; exit $?; fi
+
+[[ $# -ge 2 ]] || { echo "Usage: dashy-wc <domain> daily|status|top-products [--days=N]" >&2; exit 2; }
+DOMAIN="$1"; shift
+
+check_domain "$DOMAIN" || deny "ungültige domain" "$@"
+LOG_DOMAIN="$DOMAIN"
+SITE_PATH="${WWW_ROOT}/${DOMAIN}"
+[[ -d "$SITE_PATH" && ! -L "$SITE_PATH" ]] || deny "site-pfad fehlt" "$@"
+
+ME_UID=$(id -u); OWNER_UID=$(stat -c %u "$SITE_PATH")
+[[ "$ME_UID" -ne 0 ]] || deny "läuft als root" "$@"
+[[ "$ME_UID" -eq "$OWNER_UID" ]] || deny "runas-user besitzt site nicht" "$@"
+
+PARSED=$(check_args "$@") || deny "$PARSED" "$@"
+REPORT="${PARSED%% *}"; DAYS="${PARSED##* }"
+
+TODAY=$(TZ="$SITE_TZ" date +%F)
+FROM=$(TZ="$SITE_TZ" date -d "${TODAY} -$(( DAYS > 0 ? DAYS - 1 : 0 )) days" +%F)
+
+cd / || deny "cd fehlgeschlagen" "$@"
+ERR_FILE=$(mktemp -t dashy-wc.XXXXXX) || deny "mktemp fehlgeschlagen" "$@"
+chmod 600 "$ERR_FILE"
+trap 'rm -f "$ERR_FILE"' EXIT
+# stdout und stderr getrennt: die Datenzelle kommt nur aus stdout, stderr dient nur der Fehlerauswertung (nie roh ins JSON).
+# timeout: eine hängende Verbindung blockiert sonst den SSH-Kanal; max_statement_time bricht die Query auch serverseitig ab.
+run_wp() {
+    env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/nonexistent LANG=C.UTF-8 \
+        WP_CLI_CONFIG_PATH=/dev/null WP_CLI_PACKAGES_DIR=/nonexistent \
+        WP_CLI_DISABLE_AUTO_CHECK_UPDATE=1 \
+        timeout 30 "$WP_BIN" --path="$SITE_PATH" --skip-packages --skip-plugins --skip-themes "$@" 2>"$ERR_FILE"
+}
+emit() {  # emit <exit> <ok-json> <currency> <data-json> <error>
+    log_line "$1" "$(( $(now_ms) - T0 ))" "$([[ "$1" == 0 ]] && echo ok || echo "fehler")" "${REPORT} days=${DAYS}"
+    printf '{"ok":%s,"report":"%s","days":%s,"today":"%s","currency":"%s","data":%s,"error":"%s"}\n' \
+        "$2" "$REPORT" "$DAYS" "$TODAY" "$(json_escape "$3")" "$4" "$(json_escape "$5")" || true
+    exit "$1"
+}
+fail() {  # fail <currency>: Fehlertext aus stderr+stdout filtern, nur Code oder fester Kopf
+    local all; all=$(cat "$ERR_FILE" 2>/dev/null; printf '%s' "${OUT:-}")
+    emit 1 false "$1" null "$(err_text "$all")"
+}
+
+T0=$(now_ms)
+set +e
+PREFIX=$(run_wp db prefix); RC=$?
+set -e
+[[ $RC -eq 0 ]] || { OUT=""; fail ""; }
+check_prefix "$PREFIX" || emit 1 false "" null "Tabellenpräfix nicht lesbar"
+
+# Zweite Absicherung neben der festen SQL: Sitzung read-only, Laufzeit begrenzt (beide Anweisungen erzeugen keine Ausgabe)
+SQL="$(sql_prelude) SELECT (SELECT option_value FROM ${PREFIX}options WHERE option_name = 'woocommerce_currency' LIMIT 1) AS currency, ($(sql_for "$REPORT" "$PREFIX" "$FROM")) AS data"
+set +e
+OUT=$(run_wp db query "$SQL" --skip-column-names --raw); RC=$?
+set -e
+[[ $RC -eq 0 ]] || fail ""
+[[ "$OUT" == *$'\t'* ]] || emit 1 false "" null "Ausgabeformat unerwartet"
+CURRENCY="${OUT%%$'\t'*}"; DATA="${OUT#*$'\t'}"
+[[ "$CURRENCY" =~ ^[A-Z]{3}$ ]] || CURRENCY=""
+BAD=$(check_data "$DATA")
+[[ -z "$BAD" ]] || emit 1 false "$CURRENCY" null "$BAD"
+emit 0 true "$CURRENCY" "$DATA" ""
