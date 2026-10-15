@@ -35,7 +35,9 @@
 #   - rollback-db: erst ein zusätzlicher Dump des aktuellen Stands in das Snapshot-Verzeichnis
 #     (db-before-rollback-<ts>.sql.gz, im JSON als db_dump), dann Dateien wie bei rollback, dann
 #     `wp db import -` aus dem Dump des Snapshots (stdin, als Site-User). Inhalte seit dem Snapshot
-#     gehen verloren; Tabellen, die erst danach entstanden sind, bleiben stehen.
+#     gehen verloren; Tabellen, die erst danach entstanden sind, bleiben stehen. Auf Sites mit Typ
+#     "woocommerce" wird rollback-db abgelehnt (Exit 77): Bestellungen und Kunden wären unwiderruflich weg.
+#     Der Sicherungsdump ist nur manuell per `wp db import` einspielbar (bewusst kein Dashy-Pfad).
 #   - Ausgabe genau eine JSON-Zeile:
 #     {ok, kind, slug, old_version, new_version, snapshot, db_dump, smoke:{…}, error}
 #   - Ablehnung = Exit 77 ohne JSON; fehlgeschlagenes Update = Exit 1 mit JSON
@@ -291,7 +293,7 @@ wp_user() {  # wp_user <args…>
 wp_field() { local out; out=$(wp_user "$@" 2>/dev/null) || out=""; clean "$out"; }
 
 site_field() {  # site_field <label> — nur erlaubte Labels, Passwortzeilen werden nie angefasst
-    case "$1" in System-User|Site-Pfad) ;; *) echo "dashy-wp-update: label $1 nicht erlaubt" >&2; exit 3 ;; esac
+    case "$1" in System-User|Site-Pfad|Typ) ;; *) echo "dashy-wp-update: label $1 nicht erlaubt" >&2; exit 3 ;; esac
     awk -v l="$1" 'index($0, l ":") == 1 { sub("^" l ":[ \t]*", ""); print; exit }' "$SITE_FILE"
 }
 
@@ -457,6 +459,8 @@ if [[ "$MODE" == rollback || "$MODE" == rollback-db ]]; then
     [[ "$META_STATUS" =~ $STATUS_RE ]] || META_STATUS=""
     [[ "$KIND" != core || "$MODE" == rollback-db ]] || deny "core-snapshot nur mit rollback-db"
     [[ "$MODE" != rollback-db ]] || [[ -f "${SNAP_DIR}/db.sql.gz" ]] || deny "snapshot ohne db-dump"
+    # Entscheidung 2026-10-15: kein DB-Import auf Shops — Bestellungen und Kunden seit dem Snapshot wären weg
+    [[ "$MODE" != rollback-db ]] || [[ "$(site_field Typ)" != woocommerce ]] || deny "rollback-db auf woocommerce-site nicht erlaubt"
     SNAPSHOT="$SNAP_DIR"
     [[ -f "${SNAP_DIR}/db.sql.gz" ]] && DB_DUMP="${SNAP_DIR}/db.sql.gz"
 elif [[ "$MODE" == core ]]; then
