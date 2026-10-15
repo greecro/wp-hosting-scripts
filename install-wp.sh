@@ -1075,7 +1075,8 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     # Free = Google Ads + GA4 + Meta. Pro (Bucket-ZIP) = TikTok, Pinterest,
     #   Microsoft/Bing, Snapchat … + Server-Side CAPI. Ersetzt Google Tag Manager.
     #   Consent-Gating je Shop über FAZ Cookie Manager (Consent Mode v2).
-    #   Pixel-IDs/CAPI je Shop manuell in der GUI. KEIN GA4 konfigurieren.
+    #   Pixel-IDs/CAPI je Shop manuell in der GUI. GA4-Measurement-ID setzt das
+    #   Provisioning (provision-endpoint.sh, ensure_ga4) — hier nichts eintragen.
     if sudo -u "$SYSTEM_USER" wp plugin install woocommerce-google-adwords-conversion-tracking-tag --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
         log "Pixel Manager (Free-Basis) installiert"
     else

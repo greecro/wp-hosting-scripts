@@ -15,7 +15,7 @@ und Filebrowser-User** — sauber voneinander isoliert.
 - 🚀 **Eine VM-Vorlage, beliebig viele VMs** — Cloud-init-Template + Klon-Script für Proxmox
 - 🌐 **Multi-Tenant-Web-Stack** — Nginx + FastCGI-Cache, PHP 8.3-FPM (pro Site eigener Pool), Redis Object Cache
 - 🛍️ **WooCommerce-DE-ready** — rechtliche Seiten, Widerrufsrecht-Checkbox (§356/§312j BGB), 4 Payment-Gateways, PDF-Rechnungen
-- 📊 **Tracking lean & DSGVO-konform** — Matomo (cookieless) + Pixel Manager (alle Ad-Plattformen + CAPI) + FAZ Consent. Kein GA4/GTM.
+- 📊 **Tracking lean & DSGVO-konform** — Matomo (cookieless) + GA4 (Blogs via SEOPress, Shops via Pixel Manager; Measurement-ID setzt das Provisioning) + Pixel Manager (alle Ad-Plattformen + CAPI) + FAZ Consent. Kein GTM.
 - 🔒 **Härtung out-of-the-box** — fail2ban, Rate-Limits, 2FA, Chroot-SFTP, Vhost-Hardening
 - 💾 **Backups + Monitoring** — täglich Files & DB, 7-Tage-Mirror nach R2/S3/SFTP (optional age-verschlüsselt), Backup-Verify, Disk-/SSL-Alerts
 - 🔁 **Reproduzierbar** — config-getriebener, non-interaktiver Modus für Ansible/Automation
@@ -278,7 +278,7 @@ sudo bash maintenance.sh
 - **Produktfeeds + Tracking (Lean-Architektur)** — ein Feed-Tool, ein Pixel-Tool:
   - **Product Feed Manager** (`best-woocommerce-feed`, Free) — erzeugt **alle** Kataloge/Feeds: Google (Content-API-Auto-Sync), Meta, TikTok, Pinterest, Bing Shopping, Idealo/Preisvergleiche. 24h-Schedule, Custom Fields, Varianten als Zeilen (Limit 200 Produkte/Feed → Pro-Lizenz manuell auf großen Shops)
   - **Pixel Manager** (`woocommerce-google-adwords-conversion-tracking-tag`, Free + `pixel-manager-pro.zip`) — **ein** Pixel-Tool für alle Ad-Plattformen (Google Ads, Meta, TikTok, Pinterest, Bing) + Server-Side CAPI. Ersetzt Google Tag Manager. Consent-gated über FAZ.
-  - **Analytics = Matomo** via SEOpress-Modul (cookieless, consent-frei). **Kein GA4, kein GTM.**
+  - **Analytics = Matomo** via SEOpress-Modul (cookieless, consent-frei) **plus GA4** (seit 2026-10-15: Shops über den Pixel Manager, Blogs über SEOpress; die Measurement-ID trägt `provision-endpoint.sh` ein, FAZ blockt bis zum Opt-in). **Kein GTM.**
   - Keine offiziellen Channel-Plugins (redundant durch PMW+PFM), kein buggy Pinterest-Plugin.
 
 > 📡 **Tracking/Consent-Details + Pro-Shop-Checkliste:** siehe [`docs/tracking-consent.md`](docs/tracking-consent.md)
