@@ -246,6 +246,7 @@ DOMAIN="$1"; shift
 LOG_DOMAIN="$DOMAIN"
 SITE_PATH="${WWW_ROOT}/${DOMAIN}"
 [[ -d "$SITE_PATH" ]] || deny "site-pfad fehlt" "$@"
+[[ ! -L "$SITE_PATH" ]] || deny "site-pfad ist symlink" "$@"
 
 ME_UID=$(id -u); OWNER_UID=$(stat -c %u "$SITE_PATH")
 [[ "$ME_UID" -ne 0 ]] || deny "läuft als root" "$@"
