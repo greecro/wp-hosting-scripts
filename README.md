@@ -275,7 +275,7 @@ sudo bash maintenance.sh
 - **Kein WooCommerce Germanized** — Rechtskonformität wird nativ + per mu-Plugin gelöst. (Grundpreise/PAngV bei Digital-Produkten nicht pflichtig.)
 - **Rechnungen via WowInvoice** — auto-installiert aus `wowinvoice-pro.zip` (Premium-only, kein wp.org-Free). PDF-Rechnungen + Packing Slips.
 - **Payment Gateways** automatisch installiert + aktiviert (API-Keys je Shop manuell): Mollie, PayPal Payments, Stripe, Amazon Pay
-- **FunnelKit Automations** (Free-Basis + Pro-ZIP `funnelkit-automations-pro.zip`) für E-Mail-Marketing (Warenkorbabbruch, Broadcasts) — ergänzt WowRevenue (On-Site-Funnels)
+- **FunnelKit Automations** (Free-Basis + Pro-ZIP `funnelkit-automations-pro.zip`) für E-Mail-Marketing (Warenkorbabbruch, Broadcasts)
 - **Produktfeeds + Tracking (Lean-Architektur)** — ein Feed-Tool, ein Pixel-Tool:
   - **Product Feed Manager** (`best-woocommerce-feed`, Free) — erzeugt **alle** Kataloge/Feeds: Google (Content-API-Auto-Sync), Meta, TikTok, Pinterest, Bing Shopping, Idealo/Preisvergleiche. 24h-Schedule, Custom Fields, Varianten als Zeilen (Limit 200 Produkte/Feed → Pro-Lizenz manuell auf großen Shops)
   - **Pixel Manager** (`woocommerce-google-adwords-conversion-tracking-tag`, Free + `pixel-manager-pro.zip`) — **ein** Pixel-Tool für alle Ad-Plattformen (Google Ads, Meta, TikTok, Pinterest, Bing) + Server-Side CAPI. Ersetzt Google Tag Manager. Consent-gated über FAZ.
@@ -340,11 +340,8 @@ r2:wp-plugins/                          ← private/Pro-Plugin-ZIPs
 ├── fluentformpro.zip                   ← Fluent Forms Pro (alle Sites)
 ├── funnelkit-automations-pro.zip       ← E-Mail-Marketing (Woo)
 ├── pixel-manager-pro.zip               ← alle Ad-Pixel + Server-Side CAPI (Woo)
-├── postxpro.zip                        ← Tech-Blog-Blocks
 ├── seopress-pro.zip
-├── wowinvoice-pro.zip                  ← PDF-Rechnungen (Woo, Premium-only)
-├── wowrevenue-pro.zip                  ← On-Site-Funnels (Woo)
-└── wowstore-pro.zip                    ← Shop-Erweiterungen (Woo)
+└── wowinvoice-pro.zip                  ← PDF-Rechnungen (Woo, Premium-only)
 
 r2:wp-themes/                           ← private/Pro-Theme-ZIPs
 ├── blocksy.zip                         ← Parent-Theme
@@ -370,9 +367,6 @@ beim Setup automatisch heruntergeladen:
 | Redis Object Cache, FluentSMTP, Two Factor, Nginx Helper | ✓ | ✓ |
 | WebP Converter, Antispam Bee, Turnstile, FAZ Cookie Manager | ✓ | ✓ |
 | Fluent Forms + Pro (Formulare) | ✓ | ✓ |
-| **PostX Pro** (Reviews, Comparison, Query Loops) | ✓ | — |
-| **WowStore Pro** (Shop-Erweiterung) | — | ✓ |
-| **WowRevenue Pro** (On-Site-Funnels) | — | ✓ |
 | **WowInvoice** (PDF-Rechnungen, Premium-only) | — | ✓ |
 | **FunnelKit Automations** (E-Mail-Marketing) | — | ✓ |
 | **Payment Gateways** (Mollie, PayPal, Stripe, Amazon Pay) | — | ✓ |

@@ -120,9 +120,6 @@ SEOPRESS_KEY="${SEOPRESS_KEY:-}"; $NONINT || { read -rsp "SEOpress Pro Lizenz-Ke
 # (install-wp ruft dazu die Aktivierungsmethode des Plugins auf). Lifetime-Lizenz ohne
 # Site-Limit → unbedenklich fuer jede Site.
 FLUENTFORM_KEY="${FLUENTFORM_KEY:-}"; $NONINT || { read -rsp "Fluent Forms Pro Lizenz-Key (leer = überspringen): " FLUENTFORM_KEY; echo ""; }
-# PostX Pro (WPXPO/EDD): Key wird pro Blog-Site aktiviert (install-wp macht den
-# activate_license-Call an account.wpxpo.com), analog Fluent Forms.
-POSTX_KEY="${POSTX_KEY:-}"; $NONINT || { read -rsp "PostX Pro Lizenz-Key (leer = überspringen): " POSTX_KEY; echo ""; }
 # Zentrale Matomo-Instanz (Host ohne https:// und ohne Slash, z.B. analytics.example.com).
 # Nur informativ in /etc/wp-hosting/config — Matomo-Site-Anlage + SEOpress-Tracking
 # laufen zentral über provision-endpoint.sh (der Matomo-Token bleibt dort, nicht auf der VM).
@@ -1384,7 +1381,6 @@ mkdir -p /etc/wp-hosting/plugins
     printf 'MEDIA_BUCKET=%q\n'   "${MEDIA_BUCKET:-}"
     printf 'SEOPRESS_KEY=%q\n'   "${SEOPRESS_KEY:-}"
     printf 'FLUENTFORM_KEY=%q\n' "${FLUENTFORM_KEY:-}"
-    printf 'POSTX_KEY=%q\n'      "${POSTX_KEY:-}"
     printf 'MATOMO_URL=%q\n'     "${MATOMO_URL:-}"
     printf 'PMA_AUTH_PASS=%q\n'  "${PMA_AUTH_PASS}"
     printf 'FB_ADMIN_PASS=%q\n'  "${FB_ADMIN_PASS}"

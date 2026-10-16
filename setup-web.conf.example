@@ -32,10 +32,6 @@ SEOPRESS_KEY=
 # Wird pro Site in die WP-Option geschrieben UND beim Lizenzserver aktiviert.
 FLUENTFORM_KEY=
 
-# ── PostX Pro Lizenz-Key (optional; nur Blog-Sites) ──
-# Wird pro Site beim WPXPO-Lizenzserver aktiviert (EDD activate_license).
-POSTX_KEY=
-
 # ── Zentrale Matomo-Instanz (optional; Host OHNE https:// und ohne Slash) ──
 # Nur informativ in /etc/wp-hosting/config. Matomo-Site-Anlage + SEOpress-Tracking
 # laufen zentral über provision-endpoint.sh (der Matomo-Token bleibt dort, nicht auf der VM).

@@ -921,100 +921,7 @@ if [[ -f "${PLUGINS_DIR}/translatepress-free.zip" ]]; then
 fi
 
 # ── Site-Type-spezifische Pro-Plugins ─────────────────────────────────────
-if [[ "$SITE_TYPE" == "wordpress" ]]; then
-    # PostX Pro — Tech-Blog-Blocks (Reviews, Comparison-Tables, Query Loops)
-    # Pro ist ein Add-on und braucht die aktive Free-Basis (wp.org-Slug: ultimate-post)
-    if [[ -f "${PLUGINS_DIR}/postxpro.zip" ]]; then
-        if sudo -u "$SYSTEM_USER" wp plugin install ultimate-post --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
-            log "PostX (Free-Basis) installiert"
-        else
-            warn "PostX Free fehlgeschlagen (Slug: ultimate-post) — Pro läuft ohne Basis nicht"
-        fi
-        install_local_zip "${PLUGINS_DIR}/postxpro.zip" "PostX Pro"
-        log "PostX Pro installiert (Review-/Comparison-Blocks für Tech-Blogs)"
-
-        # Lizenz hinterlegen UND aktivieren — wie bei Fluent Forms Pro ist das Setzen
-        # der Option allein wertlos: die Aktivierung ist ein EDD-Remote-Call an
-        # account.wpxpo.com (activate_license, item_id 181). Der Handler unten macht
-        # exakt das, was der wp_ajax_edd_ultp_activate_license-Handler des Plugins tut
-        # (classes/updater/class-license.php), nur ohne Admin-Session. Der Key kommt
-        # per Env, nie durch argv.
-        if [[ -n "${POSTX_KEY:-}" ]]; then
-            PX_ACT_PHP=$(mktemp /tmp/pxact.XXXXXX.php)
-            cat > "$PX_ACT_PHP" <<'PXEOF'
-<?php
-$key = trim(getenv('PX_LICENSE_KEY'));
-if (!$key) { echo "no-key\n"; return; }
-$resp = wp_remote_post('https://account.wpxpo.com', array(
-    'timeout'   => 50,
-    'sslverify' => false,
-    'body'      => array(
-        'edd_action' => 'activate_license',
-        'license'    => $key,
-        'item_id'    => 181,
-        'url'        => home_url(),
-    ),
-));
-if (is_wp_error($resp) || 200 !== wp_remote_retrieve_response_code($resp)) { echo "http-error\n"; return; }
-$data = json_decode(wp_remote_retrieve_body($resp));
-if (!empty($data->success)) {
-    update_option('edd_ultp_license_key', $key);
-    update_option('edd_ultp_license_data', (array) $data);
-    echo (isset($data->license) ? $data->license : 'valid') . "\n";
-} else {
-    echo 'failed:' . (isset($data->error) ? $data->error : 'unknown') . "\n";
-}
-PXEOF
-            chmod 644 "$PX_ACT_PHP"
-            PX_STATUS=$(PX_LICENSE_KEY="$POSTX_KEY" sudo -u "$SYSTEM_USER" --preserve-env=PX_LICENSE_KEY \
-                wp eval-file "$PX_ACT_PHP" --path="$SITE_PATH" --allow-root 2>/dev/null | tr -d '\r' | tail -1)
-            rm -f "$PX_ACT_PHP"
-            if [[ "$PX_STATUS" == "valid" ]]; then
-                log "PostX Pro Lizenz aktiviert"
-            else
-                warn "PostX Pro Lizenz NICHT aktiviert (Status: ${PX_STATUS:-keine Antwort}) — im wp-admin nachholen"
-            fi
-        fi
-
-        # Addons konfigurieren (Option ultp_options): SEOPress an — PostX zeigt dann
-        # SEOPress-Meta-Descriptions statt Excerpts. Elementor aus — wir bauen mit
-        # Gutenberg. ChatGPT aus — will den OpenAI-Key im Klartext in wp_options und
-        # kennt nur veraltete Modelle (Entscheidung 2026-08-18).
-        sudo -u "$SYSTEM_USER" wp eval '
-            $o = get_option("ultp_options", array()); if (!is_array($o)) $o = array();
-            $o["ultp_seopress"] = "true"; $o["ultp_elementor"] = "false"; $o["ultp_chatgpt"] = "false";
-            update_option("ultp_options", $o); echo "ok";
-        ' --path="$SITE_PATH" --allow-root >/dev/null 2>&1 \
-            && log "PostX: SEOPress-Addon an; Elementor + ChatGPT aus" \
-            || warn "PostX: Addon-Konfiguration fehlgeschlagen"
-    fi
-fi
-
 if [[ "$SITE_TYPE" == "woocommerce" ]]; then
-    # WowStore Pro — Shop-Erweiterung (Quick-View, Filter, Wishlist, Produktgalerien)
-    # Pro ist ein Add-on und braucht die aktive Free-Basis (wp.org-Slug: product-blocks)
-    if [[ -f "${PLUGINS_DIR}/wowstore-pro.zip" ]]; then
-        if sudo -u "$SYSTEM_USER" wp plugin install product-blocks --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
-            log "WowStore (Free-Basis) installiert"
-        else
-            warn "WowStore Free fehlgeschlagen (Slug: product-blocks) — Pro läuft ohne Basis nicht"
-        fi
-        install_local_zip "${PLUGINS_DIR}/wowstore-pro.zip" "WowStore Pro"
-        log "WowStore Pro installiert (Shop-Erweiterungen)"
-    fi
-
-    # WowRevenue Pro — On-Site-Funnels (One-Click Upsells, Order Bumps, Cross-Sells)
-    # Pro ist ein Add-on und braucht die aktive Free-Basis (wp.org-Slug: revenue)
-    if [[ -f "${PLUGINS_DIR}/wowrevenue-pro.zip" ]]; then
-        if sudo -u "$SYSTEM_USER" wp plugin install revenue --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
-            log "WowRevenue (Free-Basis) installiert"
-        else
-            warn "WowRevenue Free fehlgeschlagen (Slug: revenue) — Pro läuft ohne Basis nicht"
-        fi
-        install_local_zip "${PLUGINS_DIR}/wowrevenue-pro.zip" "WowRevenue Pro"
-        log "WowRevenue Pro installiert (On-Site Upsell-/Cross-Sell-Funnels)"
-    fi
-
     # WowInvoice — WooCommerce PDF-Rechnungen + Packing Slips
     # Premium-only (kein Free auf wp.org) → vollständiges Plugin direkt aus Bucket-ZIP
     if [[ -f "${PLUGINS_DIR}/wowinvoice-pro.zip" ]]; then
@@ -1025,7 +932,7 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     fi
 
     # FunnelKit Automations — E-Mail-Marketing (Warenkorbabbruch, Broadcasts, Sequenzen)
-    # Free-Basis aus WP-Repo + Pro-Add-on aus Bucket (ergänzt WowRevenue, andere Rolle)
+    # Free-Basis aus WP-Repo + Pro-Add-on aus Bucket
     if sudo -u "$SYSTEM_USER" wp plugin install wp-marketing-automations --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
         log "FunnelKit Automations (Free-Basis) installiert"
     else
@@ -1208,13 +1115,6 @@ if (function_exists('blocksy_companion_fs') && is_object(blocksy_companion_fs())
     try { blocksy_companion_fs()->skip_connection(); } catch (\Throwable $e) {}
 }
 
-// PostX: Datensammel-Notice (Durbin) — derselbe Transient, den der X-Klick setzt
-if (class_exists('\ULTP\Includes\Durbin\Xpo')) {
-    \ULTP\Includes\Durbin\Xpo::set_transient_without_cache('ultp_durbin_notice_ultp_durbin_dc1', 'off');
-} else {
-    update_option('_transient_ultp_durbin_notice_ultp_durbin_dc1', 'off');
-}
-
 // Core: "Welcome to WordPress!"-Panel aus + Standard-Anordnung der Dashboard-Widgets
 // (Referenz-Layout von 4you.download, 2026-08-18: Redis+Matomo | Consent+GA |
 // FluentSMTP | Site Health+Fluent Forms). Unbekannte Widget-IDs ignoriert WP einfach.
@@ -1232,7 +1132,7 @@ echo "notices-cleaned\n";
 NOTICEEOF
 chmod 644 "$NOTICE_PHP"
 if sudo -u "$SYSTEM_USER" wp eval-file "$NOTICE_PHP" --path="$SITE_PATH" --allow-root 2>/dev/null | grep -q 'notices-cleaned'; then
-    log "Admin-Notices aufgeräumt (WebP/Blocksy/PostX/Welcome-Panel; Redis via wp-config)"
+    log "Admin-Notices aufgeräumt (WebP/Blocksy/Welcome-Panel; Redis via wp-config)"
 else
     warn "Admin-Notices-Aufräumen fehlgeschlagen — Banner ggf. im Dashboard wegklicken"
 fi
