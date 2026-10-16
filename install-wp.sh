@@ -1516,7 +1516,7 @@ cat > "${SITE_PATH}/wp-content/mu-plugins/maintenance-mode.php" <<'MUPLUGIN'
  * maintenance), das deckt auch diesen 200er ab.
  *
  * Eingeloggte User (Admin) sehen die Seite immer normal.
- * wp-login.php ist immer erreichbar.
+ * wp-login.php und /wp-admin sind immer erreichbar.
  */
 
 // CLI und Cron nie blockieren — sonst sind wp-cli-Wartungsskripte (update-wp,
@@ -1534,8 +1534,9 @@ if ( ! file_exists( $_wph_flag ) ) {
 
 $_wph_uri = $_SERVER['REQUEST_URI'] ?? '';
 
-// wp-login.php immer durchlassen
-if ( strpos( $_wph_uri, 'wp-login.php' ) !== false ) {
+// wp-login.php immer durchlassen, /wp-admin ebenso: WordPress leitet Ausgeloggte dort
+// selbst auf den Login um (sonst sahen sie unter /wp-admin nur die Platzhalterseite)
+if ( strpos( $_wph_uri, 'wp-login.php' ) !== false || preg_match( '#^/wp-admin(/|$|\?)#', $_wph_uri ) ) {
     return;
 }
 
