@@ -938,15 +938,31 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     else
         warn "FunnelKit Automations Free fehlgeschlagen (Slug prüfen: wp-marketing-automations)"
     fi
-    if [[ -f "${PLUGINS_DIR}/funnelkit-automations-pro.zip" ]]; then
-        # NUR installieren, NICHT aktivieren: Die Pro-ZIP im Bucket kann mit der aktuellen
-        # FunnelKit-Free-Basis (wp.org) inkompatibel sein und wirft dann bei Aktivierung
-        # "Class BWFAN_API_Loader not found" bei JEDEM WP-Load → vergiftet alle folgenden
-        # wp-cli-Aufrufe (Payment-Gateways etc. schlagen fehl, Lauf bricht ab). Aktivierung
-        # daher manuell im Dashboard, sobald eine zur Free-Version passende Pro-ZIP vorliegt.
-        sudo -u "$SYSTEM_USER" wp plugin install "${PLUGINS_DIR}/funnelkit-automations-pro.zip" \
-            --path="$SITE_PATH" --allow-root || warn "FunnelKit Pro: Install fehlgeschlagen, übersprungen"
-        warn "FunnelKit Automations Pro installiert, aber NICHT aktiviert — Free/Pro-Versionskompatibilität prüfen, dann im Dashboard aktivieren"
+    # Pro + Connectors liegen versioniert im Bucket (wp-marketing-automations-pro-v3.8.2.zip,
+    # …-connectors-v3.3.2.zip) — jeweils die höchste Version nehmen.
+    FK_PRO=$(compgen -G "${PLUGINS_DIR}/wp-marketing-automations-pro*.zip" | sort -V | tail -1) || true
+    FK_CON=$(compgen -G "${PLUGINS_DIR}/wp-marketing-automations-connectors*.zip" | sort -V | tail -1) || true
+    if [[ -n "$FK_PRO" ]]; then
+        # Nur bei gleicher Major-Version mit der Free-Basis aktivieren: Pro 2.3.0 rief
+        # BWFAN_API_Loader::register() schon beim Include auf, Free 3.x lädt die Klasse
+        # später → Fatal bei JEDEM WP-Load, alle folgenden wp-cli-Aufrufe scheitern.
+        # Pro 3.8.2 mit Free 3.8.5.2 läuft (best4software.com, 2026-10-16).
+        FK_FREE_V=$(sudo -u "$SYSTEM_USER" wp plugin get wp-marketing-automations --field=version \
+            --path="$SITE_PATH" --allow-root 2>/dev/null) || FK_FREE_V=""
+        FK_PRO_V=$(unzip -p "$FK_PRO" "wp-marketing-automations-pro/wp-marketing-automations-pro.php" 2>/dev/null \
+            | sed -nE 's/^[[:space:]*]*Version:[[:space:]]*([0-9.]+).*/\1/p' | sed -n '1p') || FK_PRO_V=""
+        if [[ -n "$FK_FREE_V" && "${FK_FREE_V%%.*}" == "${FK_PRO_V%%.*}" ]]; then
+            install_local_zip "$FK_PRO" "FunnelKit Automations Pro ${FK_PRO_V}" \
+                && log "FunnelKit Automations Pro ${FK_PRO_V} aktiv (Free ${FK_FREE_V})"
+            [[ -n "$FK_CON" ]] && install_local_zip "$FK_CON" "FunnelKit Connectors" \
+                && log "FunnelKit Connectors aktiv"
+        else
+            sudo -u "$SYSTEM_USER" wp plugin install "$FK_PRO" --path="$SITE_PATH" --allow-root \
+                || warn "FunnelKit Pro: Install fehlgeschlagen, übersprungen"
+            warn "FunnelKit Pro ${FK_PRO_V:-?} passt nicht zu Free ${FK_FREE_V:-?} — installiert, NICHT aktiviert (neuere Pro-ZIP in den Bucket)"
+        fi
+    else
+        warn "FunnelKit Pro ZIP fehlt: ${PLUGINS_DIR}/wp-marketing-automations-pro*.zip — sync-plugins.sh ausführen"
     fi
 
     # Payment Gateways — nur Plugin-Install + Aktivierung; API-Keys je Shop manuell

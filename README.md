@@ -275,7 +275,7 @@ sudo bash maintenance.sh
 - **Kein WooCommerce Germanized** — Rechtskonformität wird nativ + per mu-Plugin gelöst. (Grundpreise/PAngV bei Digital-Produkten nicht pflichtig.)
 - **Rechnungen via WowInvoice** — auto-installiert aus `wowinvoice-pro.zip` (Premium-only, kein wp.org-Free). PDF-Rechnungen + Packing Slips.
 - **Payment Gateways** automatisch installiert + aktiviert (API-Keys je Shop manuell): Mollie, PayPal Payments, Stripe, Amazon Pay
-- **FunnelKit Automations** (Free-Basis + Pro-ZIP `funnelkit-automations-pro.zip`) für E-Mail-Marketing (Warenkorbabbruch, Broadcasts)
+- **FunnelKit Automations** (Free-Basis + Pro- und Connectors-ZIP `wp-marketing-automations-{pro,connectors}-v*.zip`, jeweils höchste Version; Pro wird nur bei gleicher Major-Version wie Free aktiviert) für E-Mail-Marketing (Warenkorbabbruch, Broadcasts)
 - **Produktfeeds + Tracking (Lean-Architektur)** — ein Feed-Tool, ein Pixel-Tool:
   - **Product Feed Manager** (`best-woocommerce-feed`, Free) — erzeugt **alle** Kataloge/Feeds: Google (Content-API-Auto-Sync), Meta, TikTok, Pinterest, Bing Shopping, Idealo/Preisvergleiche. 24h-Schedule, Custom Fields, Varianten als Zeilen (Limit 200 Produkte/Feed → Pro-Lizenz manuell auf großen Shops)
   - **Pixel Manager** (`woocommerce-google-adwords-conversion-tracking-tag`, Free + `pixel-manager-pro.zip`) — **ein** Pixel-Tool für alle Ad-Plattformen (Google Ads, Meta, TikTok, Pinterest, Bing) + Server-Side CAPI. Ersetzt Google Tag Manager. Consent-gated über FAZ.
@@ -338,7 +338,8 @@ r2:db-backups/                          ← Datenbank-Backups (7-Tage-Mirror)
 r2:wp-plugins/                          ← private/Pro-Plugin-ZIPs
 ├── blocksy-companion-pro.zip
 ├── fluentformpro.zip                   ← Fluent Forms Pro (alle Sites)
-├── funnelkit-automations-pro.zip       ← E-Mail-Marketing (Woo)
+├── wp-marketing-automations-pro-v*.zip         ← FunnelKit Pro, E-Mail-Marketing (Woo)
+├── wp-marketing-automations-connectors-v*.zip  ← FunnelKit Connectors (Woo)
 ├── pixel-manager-pro.zip               ← alle Ad-Pixel + Server-Side CAPI (Woo)
 ├── seopress-pro.zip
 └── wowinvoice-pro.zip                  ← PDF-Rechnungen (Woo, Premium-only)
