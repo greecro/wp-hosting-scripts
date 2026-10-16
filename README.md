@@ -14,7 +14,7 @@ und Filebrowser-User** — sauber voneinander isoliert.
 
 - 🚀 **Eine VM-Vorlage, beliebig viele VMs** — Cloud-init-Template + Klon-Script für Proxmox
 - 🌐 **Multi-Tenant-Web-Stack** — Nginx + FastCGI-Cache, PHP 8.3-FPM (pro Site eigener Pool), Redis Object Cache
-- 🛍️ **WooCommerce-DE-ready** — rechtliche Seiten, Widerrufsrecht-Checkbox (§356/§312j BGB), 4 Payment-Gateways
+- 🛍️ **WooCommerce-DE-ready** — rechtliche Seiten, Widerrufsrecht-Checkbox (§356/§312j BGB), 4 Payment-Gateways, PDF-Rechnungen
 - 📊 **Tracking lean & DSGVO-konform** — Matomo (cookieless) + GA4 (Blogs via SEOPress, Shops via Pixel Manager; Measurement-ID setzt das Provisioning) + Pixel Manager (alle Ad-Plattformen + CAPI) + FAZ Consent. Kein GTM.
 - 🔒 **Härtung out-of-the-box** — fail2ban, Rate-Limits, 2FA, Chroot-SFTP, Vhost-Hardening
 - 💾 **Backups + Monitoring** — täglich Files & DB, 7-Tage-Mirror nach R2/S3/SFTP (optional age-verschlüsselt), Backup-Verify, Disk-/SSL-Alerts
@@ -273,6 +273,7 @@ sudo bash maintenance.sh
 - **Button-Lösung** (§ 312j Abs. 3 BGB): Bestell-Button = „Zahlungspflichtig bestellen" (via `digital-checkout.php`, anpassbar)
 - **AGB-Checkbox** am Checkout automatisch (WooCommerce zeigt sie, da AGB als Terms-Page gesetzt)
 - **Kein WooCommerce Germanized** — Rechtskonformität wird nativ + per mu-Plugin gelöst. (Grundpreise/PAngV bei Digital-Produkten nicht pflichtig.)
+- **Rechnungen via PDF Invoices & Packing Slips** (WP Overnight, wp.org-Free) — fortlaufende Nummern, PDF an den WooCommerce-Mails, Lieferscheine. Steuernummer/USt-ID je Shop in den Plugin-Einstellungen.
 - **Payment Gateways** automatisch installiert + aktiviert (API-Keys je Shop manuell): Mollie, PayPal Payments, Stripe, Amazon Pay
 - **FunnelKit Automations** (Free-Basis + Pro- und Connectors-ZIP `wp-marketing-automations-{pro,connectors}-v*.zip`, jeweils höchste Version; Pro wird nur bei gleicher Major-Version wie Free aktiviert) für E-Mail-Marketing (Warenkorbabbruch, Broadcasts)
 - **Produktfeeds + Tracking (Lean-Architektur)** — ein Feed-Tool, ein Pixel-Tool:
@@ -366,6 +367,7 @@ beim Setup automatisch heruntergeladen:
 | Redis Object Cache, FluentSMTP, Two Factor, Nginx Helper | ✓ | ✓ |
 | WebP Converter, Antispam Bee, Turnstile, FAZ Cookie Manager | ✓ | ✓ |
 | Fluent Forms + Pro (Formulare) | ✓ | ✓ |
+| **PDF Invoices & Packing Slips** (Rechnungen, Free) | — | ✓ |
 | **FunnelKit Automations** (E-Mail-Marketing) | — | ✓ |
 | **Payment Gateways** (Mollie, PayPal, Stripe, Amazon Pay) | — | ✓ |
 | **Product Feed Manager** (Free, alle Feeds: Google/Meta/TikTok/Pinterest/Bing/Idealo) | — | ✓ |

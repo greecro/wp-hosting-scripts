@@ -956,6 +956,34 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
         warn "FunnelKit Pro ZIP fehlt: ${PLUGINS_DIR}/wp-marketing-automations-pro*.zip — sync-plugins.sh ausführen"
     fi
 
+    # PDF-Rechnungen + Lieferscheine (WP Overnight, wp.org-Free) — ersetzt WowInvoice
+    # (2026-10-16). Fortlaufende Nummern, PDF hängt an den WooCommerce-Mails.
+    # Steuernummer/USt-ID je Shop manuell in den Plugin-Einstellungen (§ 14 UStG).
+    if sudo -u "$SYSTEM_USER" wp plugin install woocommerce-pdf-invoices-packing-slips --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
+        log "PDF Invoices & Packing Slips installiert (→ Steuernummer/USt-ID in den Plugin-Einstellungen eintragen)"
+        # Die Install-Routine des Plugins hängt an admin_init — per CLI aktiviert bleibt es
+        # ohne Einstellungen und erzeugt keine Rechnung, bis jemand wp-admin öffnet. Daher
+        # hier auslösen. Rechnungsnummer und -datum sind Pflicht (§ 14 UStG), im Default
+        # aber aus. Logo = Site-Logo, falls sync-media es schon gesetzt hat.
+        sudo -u "$SYSTEM_USER" wp eval '
+            \WPO\IPS\Install::instance()->do_install();
+            $i = get_option("wpo_wcpdf_documents_settings_invoice", array()); if (!is_array($i)) $i = array();
+            $i["display_number"] = "invoice_number"; $i["display_date"] = "document_date";
+            update_option("wpo_wcpdf_documents_settings_invoice", $i);
+            $logo = (int) get_theme_mod("custom_logo");
+            if ($logo) {
+                $g = get_option("wpo_wcpdf_settings_general", array()); if (!is_array($g)) $g = array();
+                $g["header_logo"] = array("default" => $logo); $g["header_logo_height"] = "1.5cm";
+                update_option("wpo_wcpdf_settings_general", $g);
+            }
+            echo "ok";
+        ' --path="$SITE_PATH" --allow-root 2>/dev/null | grep -q '^ok' \
+            && log "PDF-Rechnungen: Nummer + Datum auf der Rechnung an" \
+            || warn "PDF-Rechnungen: Grundeinstellungen fehlgeschlagen — im wp-admin prüfen"
+    else
+        warn "PDF Invoices & Packing Slips fehlgeschlagen (Slug: woocommerce-pdf-invoices-packing-slips)"
+    fi
+
     # Payment Gateways — nur Plugin-Install + Aktivierung; API-Keys je Shop manuell
     info "Payment Gateways werden installiert (API-Keys je Shop manuell konfigurieren)..."
     for PG_SLUG in \
