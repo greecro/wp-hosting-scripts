@@ -922,15 +922,6 @@ fi
 
 # ── Site-Type-spezifische Pro-Plugins ─────────────────────────────────────
 if [[ "$SITE_TYPE" == "woocommerce" ]]; then
-    # WowInvoice — WooCommerce PDF-Rechnungen + Packing Slips
-    # Premium-only (kein Free auf wp.org) → vollständiges Plugin direkt aus Bucket-ZIP
-    if [[ -f "${PLUGINS_DIR}/wowinvoice-pro.zip" ]]; then
-        install_local_zip "${PLUGINS_DIR}/wowinvoice-pro.zip" "WowInvoice"
-        log "WowInvoice installiert (PDF-Rechnungen / Packing Slips)"
-    else
-        warn "WowInvoice ZIP fehlt: ${PLUGINS_DIR}/wowinvoice-pro.zip — sync-plugins.sh ausführen"
-    fi
-
     # FunnelKit Automations — E-Mail-Marketing (Warenkorbabbruch, Broadcasts, Sequenzen)
     # Free-Basis aus WP-Repo + Pro-Add-on aus Bucket
     if sudo -u "$SYSTEM_USER" wp plugin install wp-marketing-automations --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
