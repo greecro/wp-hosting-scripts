@@ -87,3 +87,5 @@ grep -q '^logo=ok'    <<<"$RESULT" && log "Logo gesetzt (custom_logo)"
 grep -q '^logo=fail'  <<<"$RESULT" && warn "Logo-Import fehlgeschlagen"
 grep -q '^favicon=ok' <<<"$RESULT" && log "Favicon gesetzt (site_icon)"
 grep -q '^favicon=fail' <<<"$RESULT" && warn "Favicon-Import fehlgeschlagen"
+# Letztes grep ohne Treffer darf nicht zum Exit-Code des Scripts werden
+exit 0
