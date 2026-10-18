@@ -480,6 +480,8 @@ cat > "${SITE_PATH}/wp-content/mu-plugins/maintenance-mode.php" <<'MUPLUGIN'
 $_f = dirname(__FILE__) . '/../.maintenance-active';
 if (!file_exists($_f)) return;
 if (isset($_SERVER['REQUEST_URI']) && strpos($_SERVER['REQUEST_URI'], 'wp-login.php') !== false) return;
+// base send: signierte REST-Abfragen und Webhook-Zustellungen auch im Wartungsmodus durchlassen (Echtheit prueft das Plugin per HMAC).
+if (isset($_SERVER['REQUEST_URI']) && (strpos($_SERVER['REQUEST_URI'], '/wp-json/basend/') === 0 || strpos($_SERVER['REQUEST_URI'], 'rest_route=/basend/') !== false)) return;
 foreach (array_keys($_COOKIE) as $_k) { if (strpos($_k, 'wordpress_logged_in_') === 0) return; }
 http_response_code(503);
 header('Retry-After: 3600');

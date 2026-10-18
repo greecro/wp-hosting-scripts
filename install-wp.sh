@@ -1517,6 +1517,13 @@ if ( strpos( $_wph_uri, 'wp-login.php' ) !== false || preg_match( '#^/wp-admin(/
     return;
 }
 
+// base send (Newsletter-Plugin): signierte REST-Abfragen und Webhook-Zustellungen muessen auch im
+// Wartungsmodus durch, sonst bekommt base send die Platzhalterseite statt JSON (real 2026-10-18,
+// examplecom). Die Echtheit prueft das Plugin selbst per HMAC, hier wird nichts geoeffnet.
+if ( strpos( $_wph_uri, '/wp-json/basend/' ) === 0 || strpos( $_wph_uri, 'rest_route=/basend/' ) !== false ) {
+    return;
+}
+
 // Eingeloggte User durchlassen (Cookie-Check vor WordPress-Init)
 foreach ( array_keys( $_COOKIE ) as $_wph_key ) {
     if ( strpos( $_wph_key, 'wordpress_logged_in_' ) === 0 ) {
