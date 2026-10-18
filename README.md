@@ -185,8 +185,10 @@ Danach Endpunkt provisionieren (`provision-endpoint.sh` im privaten `homelab-pro
 > **Non-Interactive (für Automation/Ansible):**
 > ```bash
 > sudo bash install-wp.sh --domain example.com --type wordpress --yes
-> sudo bash install-wp.sh --domain shop.de --type woocommerce --shop-name "Mein Shop" --admin-ip 1.2.3.4 --yes
+> sudo bash install-wp.sh --domain shop.de --type woocommerce --shop-name "Mein Shop" --admin-ip 1.2.3.4 --locale de_DE --yes
 > ```
+>
+> `--locale` setzt die WordPress-Sprache (Standard `en_US`). Bei einer anderen Locale werden Core-Paket, WPLANG und die Sprachpakete aller wordpress.org-Plugins und -Themes installiert; WooCommerce wird erst nach dem Sprachpaket aktiviert, damit Warenkorb/Kasse/Mein Konto gleich in der Zielsprache angelegt werden.
 
 ---
 
@@ -215,7 +217,7 @@ sudo bash maintenance.sh
 - **Filebrowser-User** mit Scope auf das Site-Verzeichnis
 
 ### WordPress-Konfiguration
-- Sprache: `en_US`, Zeitzone: `Europe/Berlin`, Datum: `Y-m-d H:i`
+- Sprache: `en_US` (oder per `--locale`, z.B. `de_DE`), Zeitzone: `Europe/Berlin`, Datum: `Y-m-d H:i`
 - Permalinks: `/%category%/%postname%/`
 - Admin-Profil: Danijel Janzin, Spitzname Dany
 - **Vhost-Härtung:** `xmlrpc.php`, `wp-config.php`, `readme.html`, PHP in `/uploads/` blockiert

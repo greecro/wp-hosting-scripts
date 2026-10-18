@@ -41,6 +41,7 @@ CLI_DOMAIN=""
 CLI_TYPE=""
 CLI_ADMIN_IP=""
 CLI_SHOP_NAME=""
+CLI_LOCALE=""
 i=0
 ARGS=("$@")
 while [[ $i -lt ${#ARGS[@]} ]]; do
@@ -51,6 +52,7 @@ while [[ $i -lt ${#ARGS[@]} ]]; do
         --type)           i=$((i+1)); CLI_TYPE="${ARGS[$i]}" ;;
         --admin-ip)       i=$((i+1)); CLI_ADMIN_IP="${ARGS[$i]}" ;;
         --shop-name)      i=$((i+1)); CLI_SHOP_NAME="${ARGS[$i]}" ;;
+        --locale)         i=$((i+1)); CLI_LOCALE="${ARGS[$i]}" ;;
         -h|--help)
             cat <<HELP
 Usage: install-wp.sh [Optionen]
@@ -60,13 +62,14 @@ Interaktiv (alle Eingaben werden abgefragt):
 
 Non-Interaktiv (für Automation):
   sudo bash install-wp.sh --domain example.com --type wordpress --yes
-  sudo bash install-wp.sh --domain shop.de --type woocommerce --shop-name "Mein Shop" --yes
+  sudo bash install-wp.sh --domain shop.de --type woocommerce --shop-name "Mein Shop" --locale de_DE --yes
 
 Optionen:
   --domain <name>         Domain (z.B. meinshop.de)
   --type <wp|woo>         'wordpress' oder 'woocommerce'
   --admin-ip <ip>         WP-Admin-Zugang auf IP beschränken
   --shop-name <name>      Shop-Name (nur bei WooCommerce)
+  --locale <code>         WordPress-Sprache (z.B. de_DE; Standard: en_US)
   --yes                   Bestätigungs-Prompts überspringen
   --resume                Reste einer abgebrochenen Installation entfernen
 HELP
@@ -151,9 +154,24 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     [[ -z "$WOO_SHOP_NAME" ]] && WOO_SHOP_NAME="$DOMAIN"
 fi
 
+# Sprache: bestimmt Core-Download, WPLANG und die Sprachpakete aller Plugins/Themes.
+# en_US bleibt der Standard; WooCommerce legt seine Seiten (Warenkorb, Kasse, Mein Konto)
+# bei der Aktivierung in der dann aktiven Sprache an, deshalb muss sie vorher feststehen.
+if [[ -n "$CLI_LOCALE" ]]; then
+    WP_LOCALE="$CLI_LOCALE"
+elif ! $NON_INTERACTIVE; then
+    echo ""
+    read -rp "Sprache (WP-Locale, z.B. de_DE; leer = en_US): " WP_LOCALE
+else
+    WP_LOCALE=""
+fi
+[[ -z "$WP_LOCALE" ]] && WP_LOCALE="en_US"
+[[ ! "$WP_LOCALE" =~ ^[a-z]{2,3}(_[A-Za-z]{2,10})*$ ]] && err "Ungültige Locale: ${WP_LOCALE} (Format wie de_DE, de_DE_formal, en_US)"
+
 echo ""
 info "Domain:    ${BOLD}${DOMAIN}${NC}"
 info "Typ:       ${BOLD}${SITE_TYPE}${NC}"
+info "Sprache:   ${BOLD}${WP_LOCALE}${NC}"
 [[ -n "$ADMIN_IP" ]]       && info "Admin-IP:  ${BOLD}${ADMIN_IP}${NC}"
 [[ -n "$WOO_SHOP_NAME" ]]  && info "Shop-Name: ${BOLD}${WOO_SHOP_NAME}${NC}"
 echo ""
@@ -680,7 +698,7 @@ log "Datenbank angelegt: ${DB_NAME}"
 # Daher ins Site-Verzeichnis wechseln, das dem Systemuser gehört.
 cd "$SITE_PATH"
 info "WordPress wird heruntergeladen..."
-sudo -u "$SYSTEM_USER" wp core download --path="$SITE_PATH" --locale=en_US --allow-root
+sudo -u "$SYSTEM_USER" wp core download --path="$SITE_PATH" --locale="$WP_LOCALE" --allow-root
 
 # DB-Passwort per stdin (--prompt=dbpass), nicht als --dbpass in der argv (Prozessliste).
 # stdout nach /dev/null: wp-cli druckt bei --prompt die zusammengesetzte Kommandozeile
@@ -742,7 +760,16 @@ log "WordPress installiert"
 sudo -u "$SYSTEM_USER" wp option update timezone_string "Europe/Berlin"  --path="$SITE_PATH" --allow-root
 sudo -u "$SYSTEM_USER" wp option update date_format "Y-m-d"              --path="$SITE_PATH" --allow-root
 sudo -u "$SYSTEM_USER" wp option update time_format "H:i"                --path="$SITE_PATH" --allow-root
-sudo -u "$SYSTEM_USER" wp option update WPLANG ""                        --path="$SITE_PATH" --allow-root
+# WPLANG: en_US ist in WordPress der leere Wert. Für alle anderen Sprachen das Core-Paket
+# sicherstellen (das lokalisierte Download-Paket bringt es mit, --resume oder ein
+# en-Fallback von wordpress.org nicht) und die Site umschalten.
+if [[ "$WP_LOCALE" == "en_US" ]]; then
+    sudo -u "$SYSTEM_USER" wp option update WPLANG ""                    --path="$SITE_PATH" --allow-root
+else
+    sudo -u "$SYSTEM_USER" wp language core install "$WP_LOCALE"         --path="$SITE_PATH" --allow-root 2>/dev/null || true
+    sudo -u "$SYSTEM_USER" wp site switch-language "$WP_LOCALE"          --path="$SITE_PATH" --allow-root \
+        || err "Sprachpaket ${WP_LOCALE} für WordPress nicht installierbar (Locale-Code prüfen, wordpress.org erreichbar?)"
+fi
 sudo -u "$SYSTEM_USER" wp rewrite structure "/%category%/%postname%/"    --path="$SITE_PATH" --allow-root
 sudo -u "$SYSTEM_USER" wp rewrite flush                                  --path="$SITE_PATH" --allow-root
 sudo -u "$SYSTEM_USER" wp user update "$WP_ADMIN_USER" \
@@ -894,10 +921,15 @@ fi
 # ── WooCommerce ────────────────────────────────────────────────────────────
 if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     info "WooCommerce wird installiert..."
-    sudo -u "$SYSTEM_USER" wp plugin install woocommerce --activate --path="$SITE_PATH" --allow-root || warn "Install-Schritt fehlgeschlagen, uebersprungen"
-
-    # Deutsche Sprachdateien
-    sudo -u "$SYSTEM_USER" wp language plugin install woocommerce en_US --path="$SITE_PATH" --allow-root 2>/dev/null || true
+    # Erst installieren, Sprachpaket laden, DANN aktivieren: WooCommerce legt bei der
+    # Aktivierung seine Seiten (Cart/Checkout/My account) über _x() an — liegt das
+    # Sprachpaket da schon, heißen sie Warenkorb/Kasse/Mein Konto, sonst bleiben sie englisch.
+    sudo -u "$SYSTEM_USER" wp plugin install woocommerce --path="$SITE_PATH" --allow-root || warn "Install-Schritt fehlgeschlagen, uebersprungen"
+    if [[ "$WP_LOCALE" != "en_US" ]]; then
+        sudo -u "$SYSTEM_USER" wp language plugin install woocommerce "$WP_LOCALE" --path="$SITE_PATH" --allow-root 2>/dev/null \
+            || warn "Sprachpaket ${WP_LOCALE} für WooCommerce nicht gefunden — Shop-Seiten bleiben englisch"
+    fi
+    sudo -u "$SYSTEM_USER" wp plugin activate woocommerce --path="$SITE_PATH" --allow-root || warn "WooCommerce-Aktivierung fehlgeschlagen"
     log "WooCommerce installiert"
 fi
 
@@ -1032,6 +1064,16 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     fi
 fi
 
+# ── Sprachpakete für alle Plugins und Themes ──────────────────────────────
+# Erst jetzt, wenn der Stack komplett ist. Zieht die Übersetzungen von wordpress.org
+# für alles, was dort gelistet ist; Pro-/Bucket-Plugins bringen ihre eigenen mit und
+# werden still übersprungen. Für en_US gibt es nichts zu laden.
+if [[ "$WP_LOCALE" != "en_US" ]]; then
+    info "Sprachpakete ${WP_LOCALE} werden installiert..."
+    sudo -u "$SYSTEM_USER" wp language plugin install --all "$WP_LOCALE" --path="$SITE_PATH" --allow-root 2>/dev/null || true
+    sudo -u "$SYSTEM_USER" wp language theme  install --all "$WP_LOCALE" --path="$SITE_PATH" --allow-root 2>/dev/null || true
+    log "Sprachpakete ${WP_LOCALE} installiert (Plugins + Themes, soweit auf wordpress.org vorhanden)"
+fi
 
 # ── Bloat entfernen ───────────────────────────────────────────────────────
 # Überflüssige Plugins
@@ -1675,6 +1717,7 @@ CRED_FILE="/etc/wp-hosting/sites/${DOMAIN}.txt"
 cat > "$CRED_FILE" <<EOF
 Domain:        https://${DOMAIN}
 Typ:           ${SITE_TYPE}
+Sprache:       ${WP_LOCALE}
 Installiert:   $(date '+%Y-%m-%d %H:%M')
 
 ── WordPress ─────────────────────────────────
