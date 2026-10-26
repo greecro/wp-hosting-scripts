@@ -954,67 +954,8 @@ fi
 
 # ── Site-Type-spezifische Pro-Plugins ─────────────────────────────────────
 if [[ "$SITE_TYPE" == "woocommerce" ]]; then
-    # FunnelKit Automations — E-Mail-Marketing (Warenkorbabbruch, Broadcasts, Sequenzen)
-    # Free-Basis aus WP-Repo + Pro-Add-on aus Bucket
-    if sudo -u "$SYSTEM_USER" wp plugin install wp-marketing-automations --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
-        log "FunnelKit Automations (Free-Basis) installiert"
-    else
-        warn "FunnelKit Automations Free fehlgeschlagen (Slug prüfen: wp-marketing-automations)"
-    fi
-    # Pro + Connectors liegen versioniert im Bucket (wp-marketing-automations-pro-v3.8.2.zip,
-    # …-connectors-v3.3.2.zip) — jeweils die höchste Version nehmen.
-    FK_PRO=$(compgen -G "${PLUGINS_DIR}/wp-marketing-automations-pro*.zip" | sort -V | tail -1) || true
-    FK_CON=$(compgen -G "${PLUGINS_DIR}/wp-marketing-automations-connectors*.zip" | sort -V | tail -1) || true
-    if [[ -n "$FK_PRO" ]]; then
-        # Nur bei gleicher Major-Version mit der Free-Basis aktivieren: Pro 2.3.0 rief
-        # BWFAN_API_Loader::register() schon beim Include auf, Free 3.x lädt die Klasse
-        # später → Fatal bei JEDEM WP-Load, alle folgenden wp-cli-Aufrufe scheitern.
-        # Pro 3.8.2 mit Free 3.8.5.2 läuft (best4software.com, 2026-10-16).
-        FK_FREE_V=$(sudo -u "$SYSTEM_USER" wp plugin get wp-marketing-automations --field=version \
-            --path="$SITE_PATH" --allow-root 2>/dev/null) || FK_FREE_V=""
-        FK_PRO_V=$(unzip -p "$FK_PRO" "wp-marketing-automations-pro/wp-marketing-automations-pro.php" 2>/dev/null \
-            | sed -nE 's/^[[:space:]*]*Version:[[:space:]]*([0-9.]+).*/\1/p' | sed -n '1p') || FK_PRO_V=""
-        if [[ -n "$FK_FREE_V" && "${FK_FREE_V%%.*}" == "${FK_PRO_V%%.*}" ]]; then
-            install_local_zip "$FK_PRO" "FunnelKit Automations Pro ${FK_PRO_V}" \
-                && log "FunnelKit Automations Pro ${FK_PRO_V} aktiv (Free ${FK_FREE_V})"
-            [[ -n "$FK_CON" ]] && install_local_zip "$FK_CON" "FunnelKit Connectors" \
-                && log "FunnelKit Connectors aktiv"
-        else
-            sudo -u "$SYSTEM_USER" wp plugin install "$FK_PRO" --path="$SITE_PATH" --allow-root \
-                || warn "FunnelKit Pro: Install fehlgeschlagen, übersprungen"
-            warn "FunnelKit Pro ${FK_PRO_V:-?} passt nicht zu Free ${FK_FREE_V:-?} — installiert, NICHT aktiviert (neuere Pro-ZIP in den Bucket)"
-        fi
-    else
-        warn "FunnelKit Pro ZIP fehlt: ${PLUGINS_DIR}/wp-marketing-automations-pro*.zip — sync-plugins.sh ausführen"
-    fi
-
-    # PDF-Rechnungen + Lieferscheine (WP Overnight, wp.org-Free) — ersetzt WowInvoice
-    # (2026-10-16). Fortlaufende Nummern, PDF hängt an den WooCommerce-Mails.
-    # Steuernummer/USt-ID je Shop manuell in den Plugin-Einstellungen (§ 14 UStG).
-    if sudo -u "$SYSTEM_USER" wp plugin install woocommerce-pdf-invoices-packing-slips --activate --path="$SITE_PATH" --allow-root 2>/dev/null; then
-        log "PDF Invoices & Packing Slips installiert (→ Steuernummer/USt-ID in den Plugin-Einstellungen eintragen)"
-        # Die Install-Routine des Plugins hängt an admin_init — per CLI aktiviert bleibt es
-        # ohne Einstellungen und erzeugt keine Rechnung, bis jemand wp-admin öffnet. Daher
-        # hier auslösen. Rechnungsnummer und -datum sind Pflicht (§ 14 UStG), im Default
-        # aber aus. Logo = Site-Logo, falls sync-media es schon gesetzt hat.
-        sudo -u "$SYSTEM_USER" wp eval '
-            \WPO\IPS\Install::instance()->do_install();
-            $i = get_option("wpo_wcpdf_documents_settings_invoice", array()); if (!is_array($i)) $i = array();
-            $i["display_number"] = "invoice_number"; $i["display_date"] = "document_date";
-            update_option("wpo_wcpdf_documents_settings_invoice", $i);
-            $logo = (int) get_theme_mod("custom_logo");
-            if ($logo) {
-                $g = get_option("wpo_wcpdf_settings_general", array()); if (!is_array($g)) $g = array();
-                $g["header_logo"] = array("default" => $logo); $g["header_logo_height"] = "1.5cm";
-                update_option("wpo_wcpdf_settings_general", $g);
-            }
-            echo "ok";
-        ' --path="$SITE_PATH" --allow-root 2>/dev/null | grep -q '^ok' \
-            && log "PDF-Rechnungen: Nummer + Datum auf der Rechnung an" \
-            || warn "PDF-Rechnungen: Grundeinstellungen fehlgeschlagen — im wp-admin prüfen"
-    else
-        warn "PDF Invoices & Packing Slips fehlgeschlagen (Slug: woocommerce-pdf-invoices-packing-slips)"
-    fi
+    # Kein FunnelKit und kein Rechnungs-Plugin mehr (Entscheidung 2026-10-26): E-Mail-Marketing
+    # und Rechnungen kommen aus externen Diensten, die je Shop ein eigenes Plugin mitbringen.
 
     # Payment Gateways — nur Plugin-Install + Aktivierung; API-Keys je Shop manuell
     info "Payment Gateways werden installiert (API-Keys je Shop manuell konfigurieren)..."
