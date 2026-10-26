@@ -278,6 +278,7 @@ sudo bash maintenance.sh
 - **Rechnungen** kommen nicht mehr aus einem WordPress-Plugin, sondern aus dem externen Rechnungsdienst (eigenes Plugin je Shop, wird separat angebunden).
 - **Payment Gateways** automatisch installiert + aktiviert (API-Keys je Shop manuell): Mollie, PayPal Payments, Stripe, Amazon Pay
 - **E-Mail-Marketing** (Newsletter, Warenkorbabbruch, Nachkauf-Mails) übernimmt der externe Newsletter-Dienst über sein eigenes Plugin, kein FunnelKit mehr.
+- **Weitere Pro-Plugins aus dem Bucket** (je Shop, Lizenz von Hand): Advanced Database Cleaner Premium, Permalink Manager Pro, HappyFiles Pro (Medienordner) und `tp-byok-bridge` (eigene AI-Übersetzungs-Engines für TranslatePress, braucht dessen Free-Basis). GP Premium liegt zwar im Bucket, wird aber nicht installiert: Es braucht das GeneratePress-Theme als aktives Theme.
 - **Produktfeeds + Tracking (Lean-Architektur)** — ein Feed-Tool, ein Pixel-Tool:
   - **Product Feed Manager** (`best-woocommerce-feed`, Free) — erzeugt **alle** Kataloge/Feeds: Google (Content-API-Auto-Sync), Meta, TikTok, Pinterest, Bing Shopping, Idealo/Preisvergleiche. 24h-Schedule, Custom Fields, Varianten als Zeilen (Limit 200 Produkte/Feed → Pro-Lizenz manuell auf großen Shops)
   - **Pixel Manager** (`woocommerce-google-adwords-conversion-tracking-tag`, Free + `pixel-manager-pro.zip`) — **ein** Pixel-Tool für alle Ad-Plattformen (Google Ads, Meta, TikTok, Pinterest, Bing) + Server-Side CAPI. Ersetzt Google Tag Manager. Consent-gated über FAZ.
@@ -341,6 +342,10 @@ r2:wp-plugins/                          ← private/Pro-Plugin-ZIPs
 ├── blocksy-companion-pro.zip
 ├── fluentformpro.zip                   ← Fluent Forms Pro (alle Sites)
 ├── pixel-manager-pro.zip               ← alle Ad-Pixel + Server-Side CAPI (Woo)
+├── advanced-database-cleaner-premium.zip ← DB-Bereinigung (Woo)
+├── permalink-manager-pro.zip           ← Permalinks (Woo)
+├── happyfiles-pro.zip                  ← Medienordner (Woo)
+├── tp-byok-bridge.zip                  ← AI-Übersetzung für TranslatePress (Woo)
 └── seopress-pro.zip
 
 r2:wp-themes/                           ← private/Pro-Theme-ZIPs
@@ -367,6 +372,8 @@ beim Setup automatisch heruntergeladen:
 | Redis Object Cache, FluentSMTP, Two Factor, Nginx Helper | ✓ | ✓ |
 | WebP Converter, Antispam Bee, Turnstile, FAZ Cookie Manager | ✓ | ✓ |
 | Fluent Forms + Pro (Formulare) | ✓ | ✓ |
+| **Advanced Database Cleaner Premium, Permalink Manager Pro, HappyFiles Pro** (Pro-ZIPs, Lizenz je Shop) | — | ✓ |
+| **tp-byok-bridge** (AI-Übersetzung für TranslatePress, eigenes Plugin) | — | ✓ |
 | **Payment Gateways** (Mollie, PayPal, Stripe, Amazon Pay) | — | ✓ |
 | **Product Feed Manager** (Free, alle Feeds: Google/Meta/TikTok/Pinterest/Bing/Idealo) | — | ✓ |
 | **Pixel Manager** (Free + Pro-ZIP, alle Ad-Pixel + CAPI, ersetzt GTM) | — | ✓ |

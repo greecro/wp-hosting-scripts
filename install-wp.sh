@@ -957,6 +957,16 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     # Kein FunnelKit und kein Rechnungs-Plugin mehr (Entscheidung 2026-10-26): E-Mail-Marketing
     # und Rechnungen kommen aus externen Diensten, die je Shop ein eigenes Plugin mitbringen.
 
+    # Weitere Pro-Plugins aus dem Bucket (Entscheidung 2026-10-26): Datenbank-Bereinigung,
+    # Permalinks, Medienordner und die BYOK-Brücke für TranslatePress (braucht dessen Free-Basis
+    # von oben). Lizenzen je Shop von Hand. GP Premium bewusst nicht: braucht das GeneratePress-
+    # Theme als aktives Theme, auf Blocksy lädt es keins seiner Module.
+    for PZ in advanced-database-cleaner-premium permalink-manager-pro happyfiles-pro tp-byok-bridge; do
+        if install_local_zip "${PLUGINS_DIR}/${PZ}.zip" "$PZ"; then
+            log "${PZ} installiert"
+        fi
+    done
+
     # Payment Gateways — nur Plugin-Install + Aktivierung; API-Keys je Shop manuell
     info "Payment Gateways werden installiert (API-Keys je Shop manuell konfigurieren)..."
     for PG_SLUG in \
