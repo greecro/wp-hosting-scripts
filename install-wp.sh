@@ -61,12 +61,11 @@ Interaktiv (alle Eingaben werden abgefragt):
   sudo bash install-wp.sh
 
 Non-Interaktiv (für Automation):
-  sudo bash install-wp.sh --domain example.com --type wordpress --yes
   sudo bash install-wp.sh --domain shop.de --type woocommerce --shop-name "Mein Shop" --locale de_DE --yes
 
 Optionen:
   --domain <name>         Domain (z.B. meinshop.de)
-  --type <wp|woo>         'wordpress' oder 'woocommerce'
+  --type <woo>            nur 'woocommerce' (Standard; reine WordPress-Blogs gibt es nicht mehr)
   --admin-ip <ip>         WP-Admin-Zugang auf IP beschränken
   --shop-name <name>      Shop-Name (nur bei WooCommerce)
   --locale <code>         WordPress-Sprache (z.B. de_DE; Standard: en_US)
@@ -106,31 +105,19 @@ DOMAIN=$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]' | sed 's/^www\.//')
 # Überschreibt bewusst einen etwaigen Wert aus /etc/wp-hosting/config.
 WP_ADMIN_EMAIL="admin_dany@${DOMAIN}"
 
-if [[ -n "$CLI_TYPE" ]]; then
-    case "$CLI_TYPE" in
-        wp|wordpress)         SITE_TYPE="wordpress" ;;
-        woo|woocommerce|wc)   SITE_TYPE="woocommerce" ;;
-        *) err "Ungültiger --type: ${CLI_TYPE} (erlaubt: wordpress, woocommerce)" ;;
-    esac
-else
-    echo ""
-    echo "Welche Installation?"
-    echo "  1) WordPress"
-    echo "  2) WooCommerce"
-    echo ""
-    read -rp "Auswahl [1/2]: " site_choice
-    case "$site_choice" in
-        1) SITE_TYPE="wordpress" ;;
-        2) SITE_TYPE="woocommerce" ;;
-        *) err "Ungültige Auswahl." ;;
-    esac
-fi
+# Es gibt nur noch WooCommerce (WordPress-Blog-Rolle seit 2026-11-03 abgeschafft, Blogs laufen
+# auf Astro + Cloudflare). SITE_TYPE bleibt als Variable, weil Ausgaben und Creds-Datei sie nutzen.
+case "${CLI_TYPE:-woocommerce}" in
+    woo|woocommerce|wc) SITE_TYPE="woocommerce" ;;
+    wp|wordpress) err "--type wordpress gibt es nicht mehr: reine WordPress-Blogs wurden abgeschafft (Blogs laufen auf Astro + Cloudflare). Nur woocommerce." ;;
+    *) err "Ungültiger --type: ${CLI_TYPE} (erlaubt: woocommerce)" ;;
+esac
 
-# ── Sanity Check für WooCommerce-Type ─────────────────────────────────────
-# Woo auf einer Nicht-Woo-VM bekäme den WP-Vhost MIT FastCGI-Cache, aber OHNE
-# Cart/Checkout/Account-Bypass → kaputte/cross-customer Shop-Seiten. Deshalb hart ablehnen.
-if [[ "$SITE_TYPE" == "woocommerce" && "${VM_TYPE:-}" != "woocommerce" ]]; then
-    err "Diese VM ist nicht als WooCommerce-VM eingerichtet (VM_TYPE=${VM_TYPE:-unbekannt}). Erst setup-web.sh mit Option 2 (WooCommerce) ausführen — sonst fehlt der Cart/Checkout-Cache-Bypass."
+# ── Sanity Check: VM muss eine WooCommerce-VM sein ───────────────────────
+# Der WP-Vhost bräuchte sonst keinen Cart/Checkout/Account-Bypass im FastCGI-Cache →
+# kaputte/cross-customer Shop-Seiten. Deshalb hart ablehnen.
+if [[ "${VM_TYPE:-}" != "woocommerce" ]]; then
+    err "Diese VM ist nicht als WooCommerce-VM eingerichtet (VM_TYPE=${VM_TYPE:-unbekannt}). Erst setup-web.sh ausführen — sonst fehlt der Cart/Checkout-Cache-Bypass."
 fi
 
 if [[ -n "$CLI_ADMIN_IP" ]]; then
@@ -359,14 +346,13 @@ log "Verzeichnis: ${SITE_PATH}"
 TOTAL_RAM_KB=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 TOTAL_RAM_MB=$((TOTAL_RAM_KB / 1024))
 
-if [[ "$SITE_TYPE" == "woocommerce" ]]; then
-    # WooCommerce: static process manager für konstante Performance
-    WORKER_MEM=120
-    MAX_CHILDREN=$((TOTAL_RAM_MB / 4 / WORKER_MEM))
-    [[ $MAX_CHILDREN -lt 4 ]] && MAX_CHILDREN=4
-    [[ $MAX_CHILDREN -gt 20 ]] && MAX_CHILDREN=20
+# WooCommerce: static process manager für konstante Performance
+WORKER_MEM=120
+MAX_CHILDREN=$((TOTAL_RAM_MB / 4 / WORKER_MEM))
+[[ $MAX_CHILDREN -lt 4 ]] && MAX_CHILDREN=4
+[[ $MAX_CHILDREN -gt 20 ]] && MAX_CHILDREN=20
 
-    cat > "$PHP_POOL" <<EOF
+cat > "$PHP_POOL" <<EOF
 [${DOMAIN}]
 user  = ${SYSTEM_USER}
 group = ${SYSTEM_USER}
@@ -398,50 +384,6 @@ php_admin_flag[log_errors]            = on
 slowlog                               = /var/log/php/${DOMAIN}.slow.log
 request_slowlog_timeout               = 5s
 EOF
-else
-    # WordPress: dynamic — spart RAM bei wenig Traffic
-    WORKER_MEM=80
-    MAX_CHILDREN=$((TOTAL_RAM_MB / 4 / WORKER_MEM))
-    [[ $MAX_CHILDREN -lt 3 ]] && MAX_CHILDREN=3
-    [[ $MAX_CHILDREN -gt 12 ]] && MAX_CHILDREN=12
-    START=$((MAX_CHILDREN / 3))
-    [[ $START -lt 1 ]] && START=1
-
-    cat > "$PHP_POOL" <<EOF
-[${DOMAIN}]
-user  = ${SYSTEM_USER}
-group = ${SYSTEM_USER}
-
-listen = /run/php/php8.3-fpm-${DOMAIN}.sock
-listen.owner = www-data
-listen.group = www-data
-listen.mode  = 0660
-
-pm                   = dynamic
-pm.max_children      = ${MAX_CHILDREN}
-pm.start_servers     = ${START}
-pm.min_spare_servers = 1
-pm.max_spare_servers = $((START + 1))
-pm.max_requests      = 500
-
-; Status-Endpoint für Pool-Monitoring (über nginx /fpm-status, Basic-Auth)
-pm.status_path       = /fpm-status
-ping.path            = /fpm-ping
-ping.response        = pong
-
-php_admin_value[memory_limit]         = 256M
-php_admin_value[upload_max_filesize]  = 64M
-php_admin_value[post_max_size]        = 64M
-php_admin_value[max_execution_time]   = 60
-php_admin_value[max_input_time]       = 60
-php_admin_value[max_input_vars]       = 5000
-php_admin_value[error_log]            = /var/log/php/${DOMAIN}.error.log
-php_admin_flag[log_errors]            = on
-
-slowlog                               = /var/log/php/${DOMAIN}.slow.log
-request_slowlog_timeout               = 5s
-EOF
-fi
 
 mkdir -p /var/log/php
 log "PHP-FPM Pool konfiguriert (${SITE_TYPE}, ${MAX_CHILDREN} Worker)"
@@ -449,9 +391,8 @@ log "PHP-FPM Pool konfiguriert (${SITE_TYPE}, ${MAX_CHILDREN} Worker)"
 # ── Nginx Vhost ───────────────────────────────────────────────────────────
 SOCK="/run/php/php8.3-fpm-${DOMAIN}.sock"
 
-if [[ "$SITE_TYPE" == "woocommerce" && "$VM_TYPE" == "woocommerce" ]]; then
-    # WooCommerce: FastCGI-Cache mit smarten Bypass-Regeln
-    cat > "$NGINX_VHOST" <<EOF
+# WooCommerce: FastCGI-Cache mit smarten Bypass-Regeln
+cat > "$NGINX_VHOST" <<EOF
 server {
     listen 80;
     server_name ${DOMAIN} www.${DOMAIN};
@@ -562,116 +503,6 @@ NOIPEOF
 fi)
 }
 EOF
-else
-    # WordPress: FastCGI-Cache (ohne WooCommerce-spezifische Bypass-Regeln)
-    cat > "$NGINX_VHOST" <<EOF
-server {
-    listen 80;
-    server_name ${DOMAIN} www.${DOMAIN};
-    root ${SITE_PATH};
-    index index.php;
-
-    access_log /var/log/nginx/${DOMAIN}.access.log main;
-    error_log  /var/log/nginx/${DOMAIN}.error.log warn;
-
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-Content-Type-Options "nosniff";
-    add_header X-XSS-Protection "1; mode=block";
-
-    # Cache-Bypass: Admin, Login, eingeloggte User, POST-Requests
-    set \$skip_cache 0;
-    if (\$request_method = POST)                              { set \$skip_cache 1; }
-    if (\$query_string != "")                                 { set \$skip_cache 1; }
-    if (\$request_uri ~* "/wp-admin|/wp-login\.php|/feed")   { set \$skip_cache 1; }
-    if (\$http_cookie ~* "wordpress_logged_in")               { set \$skip_cache 1; }
-
-    location / {
-        try_files \$uri \$uri/ /index.php?\$args;
-    }
-
-    location ~ \.php\$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:${SOCK};
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-
-        fastcgi_cache            WPCACHE;
-        fastcgi_cache_valid      200 301 302 1h;
-        fastcgi_cache_use_stale  error timeout updating http_500;
-        fastcgi_cache_lock       on;
-        fastcgi_cache_bypass     \$skip_cache;
-        fastcgi_no_cache         \$skip_cache;
-        fastcgi_cache_key        "\$scheme\$request_method\$host\$request_uri";
-        add_header               X-FastCGI-Cache \$upstream_cache_status;
-    }
-
-    location ~* \.(jpg|jpeg|png|gif)\$ {
-        add_header Vary Accept;
-        try_files \$uri\$webp_suffix \$uri =404;
-        expires 30d;
-        add_header Cache-Control "public, no-transform";
-        log_not_found off;
-    }
-
-    location ~* \.(ico|css|js|pdf|txt|woff|woff2|ttf|svg|webp|avif)\$ {
-        expires 30d;
-        add_header Cache-Control "public, no-transform";
-        log_not_found off;
-    }
-
-    location ~ /\.(ht|git|env)            { deny all; }
-    location ~ /(wp-config\.php|readme\.html|license\.txt|wp-config-sample\.php)\$ { deny all; }
-    location ~* /(?:uploads|files)/.*\.php\$ { deny all; }
-    location = /xmlrpc.php                 { deny all; }
-
-    # OPcache-Status (Basic-Auth, gleiches Passwort wie phpMyAdmin)
-    location = /opcache-status {
-        auth_basic           "Restricted";
-        auth_basic_user_file /etc/nginx/.pma_htpasswd;
-        include              snippets/fastcgi-php.conf;
-        fastcgi_pass         unix:${SOCK};
-        fastcgi_param        SCRIPT_FILENAME /var/lib/wp-hosting/opcache-status.php;
-        include              fastcgi_params;
-    }
-
-    # PHP-FPM Pool-Status (Basic-Auth, gleiches Passwort wie phpMyAdmin)
-    location = /fpm-status {
-        auth_basic           "Restricted";
-        auth_basic_user_file /etc/nginx/.pma_htpasswd;
-        fastcgi_pass         unix:${SOCK};
-        fastcgi_param        SCRIPT_FILENAME \$fastcgi_script_name;
-        include              fastcgi_params;
-    }
-    location = /fpm-ping {
-        access_log           off;
-        fastcgi_pass         unix:${SOCK};
-        fastcgi_param        SCRIPT_FILENAME \$fastcgi_script_name;
-        include              fastcgi_params;
-    }
-
-$(if [[ -n "$ADMIN_IP" ]]; then
-cat <<IPEOF
-    location /wp-admin/ {
-        allow ${ADMIN_IP};
-        deny all;
-    }
-    location = /wp-login.php {
-        allow ${ADMIN_IP};
-        deny all;
-        limit_req zone=login burst=3 nodelay;
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:${SOCK};
-        include fastcgi_params;
-    }
-IPEOF
-else
-cat <<NOIPEOF
-    location = /wp-login.php { limit_req zone=login burst=3 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:${SOCK}; include fastcgi_params; }
-NOIPEOF
-fi)
-}
-EOF
-fi
 
 # Rate-Limit Zone für wp-login (einmalig in nginx.conf wenn noch nicht vorhanden)
 if ! grep -q "zone=login" /etc/nginx/nginx.conf; then
@@ -1229,46 +1060,6 @@ add_filter('faz_blocking_rules', function ($map) {
 add_filter('faz_blocking_rules_client', function ($providers) {
     $h = wph_eazy_pixel_host();
     if ($h) { $providers[$h] = array('analytics'); }
-    return $providers;
-});
-MUPLUGIN
-
-# AdSense Auto-Ads (nur Blogs) + Microsoft Clarity: beide lesen ihre ID aus einer Option, die das
-# Provisioning setzt (wph_adsense_pub_id, wph_clarity_project_id) — ohne Option bleibt alles still.
-# Shops bekommen Clarity ueber den Pixel Manager, nicht hierueber (sonst doppelt). FAZ blockt beide
-# Scripts bis zum Opt-in (AdSense: marketing, Clarity: analytics). ads.txt schreibt das Provisioning.
-cat > "${SITE_PATH}/wp-content/mu-plugins/wph-tracking-ids.php" <<'MUPLUGIN'
-<?php
-/**
- * Plugin Name: Tracking-IDs (AdSense Auto-Ads, Microsoft Clarity)
- * Description: Bindet AdSense bzw. Clarity ein, sobald das Provisioning die jeweilige ID als Option gesetzt hat; FAZ blockt bis zum Cookie-Opt-in.
- */
-function wph_adsense_pub_id() {
-    $v = get_option('wph_adsense_pub_id');
-    return (is_string($v) && preg_match('/^pub-[0-9]{10,20}$/', $v)) ? $v : '';
-}
-function wph_clarity_project_id() {
-    $v = get_option('wph_clarity_project_id');
-    return (is_string($v) && preg_match('/^[a-z0-9]{6,24}$/', $v)) ? $v : '';
-}
-add_action('wp_head', function () {
-    $pub = wph_adsense_pub_id();
-    if ($pub) {
-        echo '<script async src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-' . $pub . '" crossorigin="anonymous"></script>' . "\n";
-    }
-    $cl = wph_clarity_project_id();
-    if ($cl) {
-        echo '<script>(function(c,l,a,r,i,t,y){c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);})(window,document,"clarity","script","' . $cl . '");</script>' . "\n";
-    }
-}, 20);
-add_filter('faz_blocking_rules', function ($map) {
-    if (wph_adsense_pub_id())      { $map['pagead2.googlesyndication.com'] = 'marketing'; }
-    if (wph_clarity_project_id())  { $map['clarity.ms'] = 'analytics'; }
-    return $map;
-});
-add_filter('faz_blocking_rules_client', function ($providers) {
-    if (wph_adsense_pub_id())      { $providers['pagead2.googlesyndication.com'] = array('marketing'); }
-    if (wph_clarity_project_id())  { $providers['clarity.ms'] = array('analytics'); }
     return $providers;
 });
 MUPLUGIN

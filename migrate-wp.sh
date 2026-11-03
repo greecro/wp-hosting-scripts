@@ -31,17 +31,8 @@ DOMAIN=$(echo "$DOMAIN" | tr '[:upper:]' '[:lower:]' | sed 's/^www\.//')
 [[ ! "$DOMAIN" =~ ^[a-z0-9][a-z0-9.-]+\.[a-z]{2,}$ ]] && err "Ungültige Domain: ${DOMAIN}"
 [[ -d "/var/www/${DOMAIN}" ]] && err "Site '${DOMAIN}' existiert bereits."
 
-echo ""
-echo "Typ der Site?"
-echo "  1) WordPress"
-echo "  2) WooCommerce"
-echo ""
-read -rp "Auswahl [1/2]: " site_choice
-case "$site_choice" in
-    1) SITE_TYPE="wordpress" ;;
-    2) SITE_TYPE="woocommerce" ;;
-    *) err "Ungültige Auswahl." ;;
-esac
+# Es gibt nur noch WooCommerce (Blog-Rolle seit 2026-11-03 abgeschafft, Blogs laufen auf Astro + Cloudflare).
+SITE_TYPE="woocommerce"
 
 echo ""
 echo "Wie sollen Dateien und Datenbank übertragen werden?"
@@ -245,20 +236,9 @@ log "Berechtigungen gesetzt"
 
 # ── PHP-FPM Pool (von install-wp.sh Logik übernommen) ─────────────────────
 TOTAL_RAM_MB=$(grep MemTotal /proc/meminfo | awk '{print int($2/1024)}')
-if [[ "$SITE_TYPE" == "woocommerce" ]]; then
-    MAX_CHILDREN=$((TOTAL_RAM_MB / 4 / 120)); [[ $MAX_CHILDREN -lt 4 ]] && MAX_CHILDREN=4
-    PM_MODE="static"; PM_EXTRA="pm.max_children = ${MAX_CHILDREN}"
-    PHP_MEM="512M"; PHP_UPLOAD="128M"; PHP_EXEC="300"; PHP_VARS="10000"
-else
-    MAX_CHILDREN=$((TOTAL_RAM_MB / 4 / 80)); [[ $MAX_CHILDREN -lt 3 ]] && MAX_CHILDREN=3
-    START=$((MAX_CHILDREN / 3)); [[ $START -lt 1 ]] && START=1
-    PM_MODE="dynamic"
-    PM_EXTRA="pm.max_children = ${MAX_CHILDREN}
-pm.start_servers = ${START}
-pm.min_spare_servers = 1
-pm.max_spare_servers = $((START + 1))"
-    PHP_MEM="256M"; PHP_UPLOAD="64M"; PHP_EXEC="60"; PHP_VARS="5000"
-fi
+MAX_CHILDREN=$((TOTAL_RAM_MB / 4 / 120)); [[ $MAX_CHILDREN -lt 4 ]] && MAX_CHILDREN=4
+PM_MODE="static"; PM_EXTRA="pm.max_children = ${MAX_CHILDREN}"
+PHP_MEM="512M"; PHP_UPLOAD="128M"; PHP_EXEC="300"; PHP_VARS="10000"
 
 cat > "/etc/php/8.3/fpm/pool.d/${DOMAIN}.conf" <<EOF
 [${DOMAIN}]
@@ -292,7 +272,6 @@ if ! grep -q "zone=login" /etc/nginx/nginx.conf; then
     sed -i '/http {/a\    limit_req_zone $binary_remote_addr zone=login:10m rate=1r\/s;' /etc/nginx/nginx.conf
 fi
 
-if [[ "$SITE_TYPE" == "woocommerce" ]]; then
 cat > "/etc/nginx/sites-available/${DOMAIN}" <<EOF
 server {
     listen 80;
@@ -344,59 +323,6 @@ server {
     location = /wp-login.php   { limit_req zone=login burst=3 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:${SOCK}; include fastcgi_params; }
 }
 EOF
-else
-cat > "/etc/nginx/sites-available/${DOMAIN}" <<EOF
-server {
-    listen 80;
-    server_name ${DOMAIN} www.${DOMAIN};
-    root ${SITE_PATH};
-    index index.php;
-
-    access_log /var/log/nginx/${DOMAIN}.access.log main;
-    error_log  /var/log/nginx/${DOMAIN}.error.log warn;
-
-    add_header X-Frame-Options "SAMEORIGIN";
-    add_header X-Content-Type-Options "nosniff";
-    add_header X-XSS-Protection "1; mode=block";
-
-    set \$skip_cache 0;
-    if (\$request_method = POST)                              { set \$skip_cache 1; }
-    if (\$query_string != "")                                 { set \$skip_cache 1; }
-    if (\$request_uri ~* "/wp-admin|/wp-login\.php|/feed")   { set \$skip_cache 1; }
-    if (\$http_cookie ~* "wordpress_logged_in")               { set \$skip_cache 1; }
-
-    location / { try_files \$uri \$uri/ /index.php?\$args; }
-
-    location ~ \.php\$ {
-        include snippets/fastcgi-php.conf;
-        fastcgi_pass unix:${SOCK};
-        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-        include fastcgi_params;
-        fastcgi_cache WPCACHE; fastcgi_cache_valid 200 301 302 1h;
-        fastcgi_cache_use_stale error timeout updating http_500;
-        fastcgi_cache_lock on; fastcgi_cache_bypass \$skip_cache; fastcgi_no_cache \$skip_cache;
-        fastcgi_cache_key "\$scheme\$request_method\$host\$request_uri";
-        add_header X-FastCGI-Cache \$upstream_cache_status;
-    }
-
-    location ~* \.(jpg|jpeg|png|gif)\$ {
-        add_header Vary Accept;
-        try_files \$uri\$webp_suffix \$uri =404;
-        expires 30d; add_header Cache-Control "public, no-transform"; log_not_found off;
-    }
-
-    location ~* \.(ico|css|js|pdf|txt|woff|woff2|ttf|svg|webp|avif)\$ {
-        expires 30d; add_header Cache-Control "public, no-transform"; log_not_found off;
-    }
-
-    location ~ /\.(ht|git|env) { deny all; }
-    location ~ /(wp-config\.php|readme\.html|license\.txt|wp-config-sample\.php)\$ { deny all; }
-    location ~* /(?:uploads|files)/.*\.php\$ { deny all; }
-    location = /xmlrpc.php     { deny all; }
-    location = /wp-login.php   { limit_req zone=login burst=3 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:${SOCK}; include fastcgi_params; }
-}
-EOF
-fi
 ln -sf "/etc/nginx/sites-available/${DOMAIN}" "/etc/nginx/sites-enabled/${DOMAIN}"
 
 # ── WP-Cron ───────────────────────────────────────────────────────────────

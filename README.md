@@ -15,7 +15,7 @@ und Filebrowser-User** — sauber voneinander isoliert.
 - 🚀 **Eine VM-Vorlage, beliebig viele VMs** — Cloud-init-Template + Klon-Script für Proxmox
 - 🌐 **Multi-Tenant-Web-Stack** — Nginx + FastCGI-Cache, PHP 8.3-FPM (pro Site eigener Pool), Redis Object Cache
 - 🛍️ **WooCommerce-DE-ready** — rechtliche Seiten, Widerrufsrecht-Checkbox (§356/§312j BGB), 4 Payment-Gateways, PDF-Rechnungen
-- 📊 **Tracking lean & DSGVO-konform** — Matomo (cookieless) + GA4 (Blogs via SEOPress, Shops via Pixel Manager; Measurement-ID setzt das Provisioning) + Pixel Manager (alle Ad-Plattformen + CAPI) + FAZ Consent. Kein GTM.
+- 📊 **Tracking lean & DSGVO-konform** — Matomo (cookieless) + GA4 (via Pixel Manager; Measurement-ID setzt das Provisioning) + Pixel Manager (alle Ad-Plattformen + CAPI) + FAZ Consent. Kein GTM.
 - 🔒 **Härtung out-of-the-box** — fail2ban, Rate-Limits, 2FA, Chroot-SFTP, Vhost-Hardening
 - 💾 **Backups + Monitoring** — täglich Files & DB, 7-Tage-Mirror nach R2/S3/SFTP (optional age-verschlüsselt), Backup-Verify, Disk-/SSL-Alerts
 - 🔁 **Reproduzierbar** — config-getriebener, non-interaktiver Modus für Ansible/Automation
@@ -38,21 +38,18 @@ und Filebrowser-User** — sauber voneinander isoliert.
 
 ```
 Internet → Cloudflare → Caddy (SSL)
-                                ↓ HTTP intern
-        ┌──────────────────┬──────────────────┐
-   Web-VM 1            Web-VM 2
- (WordPress)        (WooCommerce)
- Nginx + FastCGI    Nginx + FastCGI
- PHP 8.3-FPM 256M   PHP 8.3-FPM 512M
- Redis 256mb        Redis 512mb
- phpMyAdmin :8080   phpMyAdmin :8080
- Filebrowser :8090  Filebrowser :8090
- Netdata :19999     Netdata :19999
-        └──────────────────┴──────────────────┘
-                                ↓
-                           Datenbank-VM (gemeinsam)
-                              MariaDB
-                           Netdata :19999
+                       ↓ HTTP intern
+                 Web-VM (WooCommerce)
+                 Nginx + FastCGI
+                 PHP 8.3-FPM 512M
+                 Redis 512mb
+                 phpMyAdmin :8080
+                 Filebrowser :8090
+                 Netdata :19999
+                       ↓
+                 Datenbank-VM (gemeinsam)
+                    MariaDB
+                 Netdata :19999
 ```
 
 ---
@@ -65,7 +62,7 @@ Internet → Cloudflare → Caddy (SSL)
 | `proxmox-create-vm.sh` | Proxmox Host | VM aus Template klonen & konfigurieren | Pro neue VM |
 | `setup-db.sh` | Datenbank-VM | MariaDB, Backups, Monitoring, SSH-Hardening | Einmalig pro VM |
 | `setup-web.sh` | Web-VM | Nginx, PHP, Redis, Tools, Monitoring, Backups | Einmalig pro VM |
-| `install-wp.sh` | Web-VM | Neue WordPress- oder WooCommerce-Site anlegen | Pro neue Site |
+| `install-wp.sh` | Web-VM | Neue WooCommerce-Site anlegen | Pro neue Site |
 | `delete-wp.sh` | Web-VM | Site vollständig entfernen | Bei Bedarf |
 | `maintenance.sh` | Web-VM | Maintenance Mode ein-/ausschalten | Bei Bedarf |
 | `update-wp.sh` | Web-VM | Manuelles CLI-Update einzelner Sites (mit Pre-Update-Snapshots) — Updates laufen manuell über dieses Script | Bei Bedarf |
@@ -123,7 +120,6 @@ Erstellt ein Ubuntu 24.04 Cloud-init Template (Standard-ID: 9000).
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/greecro/wp-hosting-scripts/main/proxmox-create-vm.sh
 bash proxmox-create-vm.sh   # Datenbank-VM
-bash proxmox-create-vm.sh   # WordPress-VM
 bash proxmox-create-vm.sh   # WooCommerce-VM
 ```
 
@@ -175,7 +171,7 @@ curl -fsSLO https://raw.githubusercontent.com/greecro/wp-hosting-scripts/main/in
 sudo bash install-wp.sh
 ```
 
-Fragt nach Domain und Typ (WordPress oder WooCommerce).
+Fragt nach der Domain (Typ ist immer WooCommerce).
 Danach Endpunkt provisionieren (`provision-endpoint.sh` im privaten `homelab-provisioning`): legt den Caddy-Block `https://domain.de → http://<WEB-VM-IP>:80` an, Cloudflare-DNS, cron-job.org-WP-Cron und Matomo.
 
 > **SEOpress Pro:** Lade die ZIP einmal nach `r2:wp-plugins/seopress-pro.zip` hoch (oder welcher Plugin-Bucket bei Setup angegeben wurde). Beim ersten `setup-web.sh`-Lauf wird sie automatisch nach `/etc/wp-hosting/plugins/` synchronisiert. Spätere Updates: ZIP in R2 ersetzen, dann `sudo bash sync-plugins.sh`.
@@ -184,7 +180,6 @@ Danach Endpunkt provisionieren (`provision-endpoint.sh` im privaten `homelab-pro
 
 > **Non-Interactive (für Automation/Ansible):**
 > ```bash
-> sudo bash install-wp.sh --domain example.com --type wordpress --yes
 > sudo bash install-wp.sh --domain shop.de --type woocommerce --shop-name "Mein Shop" --admin-ip 1.2.3.4 --locale de_DE --yes
 > ```
 >
@@ -261,7 +256,6 @@ sudo bash maintenance.sh
 | `performance.php` | Heartbeat drosseln, Admin-Bar ausblenden, Author-Enumeration blockieren |
 | `maintenance-mode.php` | Maintenance Mode (Flag-Datei `/wp-content/.maintenance-active`) |
 | `eazyanalytics-pixel.php` | eazyanalytics-Tracking, sobald das Provisioning Pixel-Host + Key als Optionen gesetzt hat; vom Cookie-Consent (Kategorie `analytics`) bis zum Opt-in blockiert |
-| `wph-tracking-ids.php` | AdSense Auto-Ads (Option `wph_adsense_pub_id`, Blogs) und Microsoft Clarity (Option `wph_clarity_project_id`); IDs setzt das Provisioning, FAZ blockt bis zum Opt-in (marketing/analytics). Shops bekommen Clarity über den Pixel Manager |
 | `digital-checkout.php` | Widerrufsrecht-Checkbox bei WooCommerce (nur wenn downloadbare Produkte im Warenkorb) |
 
 ### WooCommerce (zusätzlich)
@@ -282,7 +276,7 @@ sudo bash maintenance.sh
 - **Produktfeeds + Tracking (Lean-Architektur)** — ein Feed-Tool, ein Pixel-Tool:
   - **Product Feed Manager** (`best-woocommerce-feed`, Free) — erzeugt **alle** Kataloge/Feeds: Google (Content-API-Auto-Sync), Meta, TikTok, Pinterest, Bing Shopping, Idealo/Preisvergleiche. 24h-Schedule, Custom Fields, Varianten als Zeilen (Limit 200 Produkte/Feed → Pro-Lizenz manuell auf großen Shops)
   - **Pixel Manager** (`woocommerce-google-adwords-conversion-tracking-tag`, Free + `pixel-manager-pro.zip`) — **ein** Pixel-Tool für alle Ad-Plattformen (Google Ads, Meta, TikTok, Pinterest, Bing) + Server-Side CAPI. Ersetzt Google Tag Manager. Consent-gated über FAZ.
-  - **Analytics = Matomo** via SEOpress-Modul (cookieless, consent-frei) **plus GA4** (seit 2026-10-15: Shops über den Pixel Manager, Blogs über SEOpress; die Measurement-ID trägt `provision-endpoint.sh` ein, FAZ blockt bis zum Opt-in). **Kein GTM.**
+  - **Analytics = Matomo** via SEOpress-Modul (cookieless, consent-frei) **plus GA4** (seit 2026-10-15 über den Pixel Manager; die Measurement-ID trägt `provision-endpoint.sh` ein, FAZ blockt bis zum Opt-in). **Kein GTM.**
   - Keine offiziellen Channel-Plugins (redundant durch PMW+PFM), kein buggy Pinterest-Plugin.
 
 > 📡 **Tracking/Consent-Details + Pro-Shop-Checkliste:** siehe [`docs/tracking-consent.md`](docs/tracking-consent.md)
@@ -362,22 +356,22 @@ beim Setup automatisch heruntergeladen:
 - Plugins → `/etc/wp-hosting/plugins/`
 - Themes → `/etc/wp-hosting/themes/`
 
-**Welche Plugins/Themes werden pro Site-Typ aktiviert:**
+**Welche Plugins/Themes werden aktiviert (nur noch Shops, Blogs gibt es seit 2026-11-03 nicht mehr):**
 
-| Plugin/Theme | Blog (wordpress) | Shop (woocommerce) |
-|---|:---:|:---:|
-| Blocksy + Child Theme | ✓ | ✓ |
-| Blocksy Companion Pro | ✓ | ✓ |
-| SEOpress Pro | ✓ | ✓ |
-| Redis Object Cache, FluentSMTP, Two Factor, Nginx Helper | ✓ | ✓ |
-| WebP Converter, Antispam Bee, Turnstile, FAZ Cookie Manager | ✓ | ✓ |
-| Fluent Forms + Pro (Formulare) | ✓ | ✓ |
-| **Advanced Database Cleaner Premium, Permalink Manager Pro, HappyFiles Pro** (Pro-ZIPs, Lizenz je Shop) | — | ✓ |
-| **tp-byok-bridge** (AI-Übersetzung für TranslatePress, eigenes Plugin) | — | ✓ |
-| **Payment Gateways** (Mollie, PayPal, Stripe, Amazon Pay) | — | ✓ |
-| **Product Feed Manager** (Free, alle Feeds: Google/Meta/TikTok/Pinterest/Bing/Idealo) | — | ✓ |
-| **Pixel Manager** (Free + Pro-ZIP, alle Ad-Pixel + CAPI, ersetzt GTM) | — | ✓ |
-| WooCommerce | — | ✓ |
+| Plugin/Theme | Shop (woocommerce) |
+|---|:---:|
+| Blocksy + Child Theme | ✓ |
+| Blocksy Companion Pro | ✓ |
+| SEOpress Pro | ✓ |
+| Redis Object Cache, FluentSMTP, Two Factor, Nginx Helper | ✓ |
+| WebP Converter, Antispam Bee, Turnstile, FAZ Cookie Manager | ✓ |
+| Fluent Forms + Pro (Formulare) | ✓ |
+| **Advanced Database Cleaner Premium, Permalink Manager Pro, HappyFiles Pro** (Pro-ZIPs, Lizenz je Shop) | ✓ |
+| **tp-byok-bridge** (AI-Übersetzung für TranslatePress, eigenes Plugin) | ✓ |
+| **Payment Gateways** (Mollie, PayPal, Stripe, Amazon Pay) | ✓ |
+| **Product Feed Manager** (Free, alle Feeds: Google/Meta/TikTok/Pinterest/Bing/Idealo) | ✓ |
+| **Pixel Manager** (Free + Pro-ZIP, alle Ad-Pixel + CAPI, ersetzt GTM) | ✓ |
+| WooCommerce | ✓ |
 
 **Plugin-/Theme-Updates:** Nach Upload einer neuen ZIP-Version in den jeweiligen Bucket:
 ```bash

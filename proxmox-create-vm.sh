@@ -23,15 +23,13 @@ echo -e "${NC}"
 # ── VM-Typ wählen ──────────────────────────────────────────────────────────
 echo "Welche VM soll erstellt werden?"
 echo "  1) Datenbank-VM    (4 vCPU, 8 GB RAM, 50 GB Disk)"
-echo "  2) WordPress-VM    (2 vCPU, 4 GB RAM, 30 GB Disk)"
-echo "  3) WooCommerce-VM  (4 vCPU, 8 GB RAM, 40 GB Disk)"
+echo "  2) WooCommerce-VM  (4 vCPU, 8 GB RAM, 40 GB Disk)"
 echo ""
-read -rp "Auswahl [1/2/3]: " vm_choice
+read -rp "Auswahl [1/2]: " vm_choice
 
 case "$vm_choice" in
     1) VM_TYPE="db";          VM_CORES=4; VM_RAM=8192;  VM_DISK=50; VM_LABEL="Datenbank" ;;
-    2) VM_TYPE="wordpress";   VM_CORES=2; VM_RAM=4096;  VM_DISK=30; VM_LABEL="WordPress" ;;
-    3) VM_TYPE="woocommerce"; VM_CORES=4; VM_RAM=8192;  VM_DISK=40; VM_LABEL="WooCommerce" ;;
+    2) VM_TYPE="woocommerce"; VM_CORES=4; VM_RAM=8192;  VM_DISK=40; VM_LABEL="WooCommerce" ;;
     *) err "Ungültige Auswahl." ;;
 esac
 
@@ -247,7 +245,7 @@ case "$VM_TYPE" in
         echo -e "  curl -sO https://raw.githubusercontent.com/greecro/wp-hosting-scripts/main/setup-db.sh"
         echo -e "  sudo bash setup-db.sh"
         ;;
-    wordpress|woocommerce)
+    woocommerce)
         echo -e "${BOLD}  Nächster Schritt — auf der VM ausführen:${NC}"
         echo -e "  ssh ubuntu@${VM_IP}"
         echo -e "  curl -sO https://raw.githubusercontent.com/greecro/wp-hosting-scripts/main/setup-web.sh"

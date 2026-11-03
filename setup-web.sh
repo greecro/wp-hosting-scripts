@@ -68,23 +68,11 @@ echo "╚═══════════════════════�
 echo -e "${NC}"
 
 # ── VM-Typ ─────────────────────────────────────────────────────────────────
-# Config-Modus: VM_TYPE direkt (wordpress|woocommerce) setzen.
-if [[ -z "${VM_TYPE:-}" ]]; then
-    echo "Welche Art von Web-VM wird eingerichtet?"
-    echo "  1) WordPress (Standard)"
-    echo "  2) WooCommerce (Performance-optimiert)"
-    echo ""
-    read -rp "Auswahl [1/2]: " vm_choice
-    case "$vm_choice" in
-        1) VM_TYPE="wordpress" ;;
-        2) VM_TYPE="woocommerce" ;;
-        *) err "Ungültige Auswahl." ;;
-    esac
-fi
-case "$VM_TYPE" in
-    wordpress|woocommerce) ;;
-    *) err "Ungültiger VM_TYPE: ${VM_TYPE} (erlaubt: wordpress, woocommerce)" ;;
-esac
+# Es gibt nur noch WooCommerce-Web-VMs: die Blog-Rolle (WordPress-Blogs) ist seit 2026-11-03
+# abgeschafft, Blogs laufen auf Astro + Cloudflare. VM_TYPE bleibt als Variable erhalten,
+# weil install-wp.sh und die Config-Datei ihn lesen.
+VM_TYPE="${VM_TYPE:-woocommerce}"
+[[ "$VM_TYPE" == "woocommerce" ]] || err "Ungültiger VM_TYPE: ${VM_TYPE} (nur woocommerce — die WordPress-Blog-Rolle gibt es nicht mehr)"
 
 # ── Konfiguration abfragen (interaktiv oder aus --config) ──────────────────
 echo ""
@@ -421,16 +409,8 @@ log "WP-CLI installiert (SHA512 verifiziert)"
 # ── PHP 8.3 konfigurieren ─────────────────────────────────────────────────
 PHP_INI="/etc/php/8.3/fpm/php.ini"
 
-case "$VM_TYPE" in
-    woocommerce)
-        MEM_LIMIT="512M"; UPLOAD_SIZE="128M"; MAX_EXEC="300"
-        MAX_INPUT_VARS="10000"; OPCACHE_MEM="256"; OPCACHE_FILES="20000"
-        ;;
-    *)  # wordpress
-        MEM_LIMIT="256M"; UPLOAD_SIZE="64M"; MAX_EXEC="60"
-        MAX_INPUT_VARS="5000"; OPCACHE_MEM="128"; OPCACHE_FILES="10000"
-        ;;
-esac
+MEM_LIMIT="512M"; UPLOAD_SIZE="128M"; MAX_EXEC="300"
+MAX_INPUT_VARS="10000"; OPCACHE_MEM="256"; OPCACHE_FILES="20000"
 
 sed -i "s/memory_limit = .*/memory_limit = ${MEM_LIMIT}/" "$PHP_INI"
 sed -i "s/upload_max_filesize = .*/upload_max_filesize = ${UPLOAD_SIZE}/" "$PHP_INI"
@@ -457,10 +437,7 @@ EOF
 log "PHP 8.3 konfiguriert (${MEM_LIMIT} RAM, OPcache ${OPCACHE_MEM}MB)"
 
 # ── Redis konfigurieren ───────────────────────────────────────────────────
-case "$VM_TYPE" in
-    woocommerce) REDIS_MEM="512mb" ;;
-    *)           REDIS_MEM="256mb" ;;
-esac
+REDIS_MEM="512mb"
 
 sed -i "s/^# maxmemory .*/maxmemory ${REDIS_MEM}/" /etc/redis/redis.conf
 sed -i "s/^maxmemory .*/maxmemory ${REDIS_MEM}/" /etc/redis/redis.conf
