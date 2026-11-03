@@ -2,8 +2,10 @@
 /**
  * Logo/Favicon aus dem media-R2-Sync in WordPress uebernehmen.
  *
- * Aufruf: wp eval-file media-import.php <logo-pfad-oder-'-'> <favicon-pfad-oder-'-'>
+ * Aufruf: wp eval-file media-import.php <logo-pfad-oder-'-'> <favicon-pfad-oder-'-'> [force]
  * "-" als Platzhalter, wenn die jeweilige Datei nicht vorhanden ist.
+ * Ohne "force" bleibt ein schon gesetztes Logo/Favicon (gueltiger Anhang) unveraendert,
+ * damit ein erneuter Lauf keine doppelten Anhaenge in der Media Library erzeugt.
  *
  * Logo geht auf den WordPress-Standard-Theme-Mod 'custom_logo' (Blocksy nutzt
  * dafuer kein eigenes Feld, sondern die Core-Site-Identity — im Theme-Quellcode
@@ -15,6 +17,11 @@ require_once ABSPATH . 'wp-admin/includes/media.php';
 
 $logo_path    = ( ( $args[0] ?? '-' ) === '-' ) ? '' : $args[0];
 $favicon_path = ( ( $args[1] ?? '-' ) === '-' ) ? '' : $args[1];
+$force        = ( ( $args[2] ?? '-' ) === 'force' );
+
+function wph_has_attachment( $id ) {
+	return $id && 'attachment' === get_post_type( (int) $id );
+}
 
 function wph_sideload_image( $path ) {
 	if ( empty( $path ) || ! file_exists( $path ) ) {
@@ -44,7 +51,9 @@ function wph_sideload_image( $path ) {
 	return is_wp_error( $id ) ? 0 : $id;
 }
 
-if ( $logo_path ) {
+if ( $logo_path && ! $force && wph_has_attachment( get_theme_mod( 'custom_logo' ) ) ) {
+	echo "logo=skip\n";
+} elseif ( $logo_path ) {
 	$logo_id = wph_sideload_image( $logo_path );
 	if ( $logo_id ) {
 		set_theme_mod( 'custom_logo', $logo_id );
@@ -54,7 +63,9 @@ if ( $logo_path ) {
 	}
 }
 
-if ( $favicon_path ) {
+if ( $favicon_path && ! $force && wph_has_attachment( get_option( 'site_icon' ) ) ) {
+	echo "favicon=skip\n";
+} elseif ( $favicon_path ) {
 	$fav_id = wph_sideload_image( $favicon_path );
 	if ( $fav_id ) {
 		update_option( 'site_icon', $fav_id );

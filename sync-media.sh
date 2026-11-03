@@ -7,11 +7,15 @@
 # Voraussetzung: setup-web.sh wurde mit MEDIA_BUCKET ausgeführt, als root ausführen
 #
 # Usage:
-#   sudo bash sync-media.sh --domain <domain>
+#   sudo bash sync-media.sh --domain <domain> [--force]
 #
-# Erwartete Dateien im Bucket unter media/<domain>/: logo.png, logo.svg, favicon.png
-# (mindestens eine von logo.png/logo.svg + favicon.png — beide optional, es wird
-# importiert, was vorhanden ist). logo.svg hat Vorrang vor logo.png, falls beide da sind.
+# Dateien im Bucket unter media/<domain>/ (Markenpaket, erster Treffer gewinnt):
+#   Logo:    logo.png, <marke>-logo-color.png, logo.svg, <marke>-logo-color.svg
+#   Favicon: favicon.png, <marke>-icon-1024.png bzw. icon-1024.png, icon-512.png
+# PNG vor SVG: Ein SVG-Anhang hat in WordPress keine Bildmaße. Beide sind optional,
+# importiert wird, was vorhanden ist.
+# Idempotent: Sind custom_logo bzw. site_icon schon gesetzt, bleibt die Site unverändert
+# (kein zweiter Anhang). --force importiert trotzdem neu.
 
 set -euo pipefail
 
@@ -33,12 +37,13 @@ if [[ -z "${MEDIA_BUCKET:-}" ]]; then
     exit 0
 fi
 
-DOMAIN=""
+DOMAIN=""; FORCE="-"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --domain) DOMAIN="${2:-}"; shift 2 ;;
+        --force)  FORCE="force"; shift ;;
         --help|-h) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) err "Unbekannte Option: $1 (--domain)" ;;
+        *) err "Unbekannte Option: $1 (--domain, --force)" ;;
     esac
 done
 [[ -z "$DOMAIN" ]] && err "--domain fehlt."
@@ -60,32 +65,44 @@ mkdir -p "$LOCAL_DIR"
 
 info "Sync ${RCLONE_REMOTE}:${MEDIA_BUCKET}/${DOMAIN}/ → ${LOCAL_DIR}/"
 if ! rclone copy "${RCLONE_REMOTE}:${MEDIA_BUCKET}/${DOMAIN}/" "$LOCAL_DIR/" \
-        --include "logo.png" --include "logo.svg" --include "favicon.png" 2>&1; then
+        --include "logo.png" --include "logo.svg" --include "*-logo-color.png" --include "*-logo-color.svg" \
+        --include "favicon.png" --include "*icon-1024.png" --include "icon-512.png" 2>&1; then
     warn "Sync fehlgeschlagen — Bucket/Ordner erreichbar?"
     exit 1
 fi
 
-LOGO=""
-[[ -f "$LOCAL_DIR/logo.svg" ]] && LOGO="$LOCAL_DIR/logo.svg"
-[[ -z "$LOGO" && -f "$LOCAL_DIR/logo.png" ]] && LOGO="$LOCAL_DIR/logo.png"
-FAVICON=""
-[[ -f "$LOCAL_DIR/favicon.png" ]] && FAVICON="$LOCAL_DIR/favicon.png"
+# Erster vorhandener Kandidat in Reihenfolge der Muster (Globs ohne Treffer fallen weg).
+first_match() {
+    local pat f
+    shopt -s nullglob
+    for pat in "$@"; do
+        for f in "$LOCAL_DIR"/$pat; do
+            [[ -f "$f" ]] && { shopt -u nullglob; echo "$f"; return 0; }
+        done
+    done
+    shopt -u nullglob
+    return 0
+}
+LOGO=$(first_match "logo.png" "*-logo-color.png" "logo.svg" "*-logo-color.svg")
+FAVICON=$(first_match "favicon.png" "*icon-1024.png" "icon-512.png")
 
 if [[ -z "$LOGO" && -z "$FAVICON" ]]; then
-    warn "Keine logo.{png,svg}/favicon.png in media/${DOMAIN}/ gefunden — nichts zu tun."
+    warn "Weder Logo noch Favicon in media/${DOMAIN}/ gefunden — nichts zu tun."
     exit 0
 fi
+info "Logo: $([[ -n "$LOGO" ]] && basename "$LOGO" || echo —) · Favicon: $([[ -n "$FAVICON" ]] && basename "$FAVICON" || echo —)"
 
 # Site-User braucht Lesezugriff auf die gesyncten Dateien (eval-file läuft als er).
 chown -R "${SYSTEM_USER}:${SYSTEM_USER}" "$LOCAL_DIR"
 
 RESULT=$(sudo -u "$SYSTEM_USER" wp --path="$SITE_PATH" eval-file "$IMPORT_PHP" \
-    "${LOGO:--}" "${FAVICON:--}" 2>&1) || { warn "Import fehlgeschlagen:"; echo "$RESULT"; exit 1; }
+    "${LOGO:--}" "${FAVICON:--}" "$FORCE" 2>&1) || { warn "Import fehlgeschlagen:"; echo "$RESULT"; exit 1; }
 
 echo "$RESULT"
 grep -q '^logo=ok'    <<<"$RESULT" && log "Logo gesetzt (custom_logo)"
 grep -q '^logo=fail'  <<<"$RESULT" && warn "Logo-Import fehlgeschlagen"
 grep -q '^favicon=ok' <<<"$RESULT" && log "Favicon gesetzt (site_icon)"
 grep -q '^favicon=fail' <<<"$RESULT" && warn "Favicon-Import fehlgeschlagen"
+grep -q '=skip'       <<<"$RESULT" && info "Bereits gesetzt, unverändert (neu importieren: --force)"
 # Letztes grep ohne Treffer darf nicht zum Exit-Code des Scripts werden
 exit 0
