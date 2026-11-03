@@ -545,7 +545,6 @@ printf '%s\n' "$DB_PASS" | sudo -u "$SYSTEM_USER" wp config create \
     --extra-php="define('WP_REDIS_HOST', '127.0.0.1');
 define('WP_REDIS_PORT', 6379);
 define('WP_REDIS_DISABLE_BANNERS', true);
-define('WP_CACHE_KEY_SALT', '${DOMAIN}:');
 define('DISABLE_WP_CRON', true);
 define('WP_POST_REVISIONS', 5);
 define('EMPTY_TRASH_DAYS', 7);
@@ -560,6 +559,13 @@ define('AUTOSAVE_INTERVAL', 120);
 define('WP_CACHE', true);
 if (isset(\$_SERVER['HTTP_X_FORWARDED_PROTO']) && \$_SERVER['HTTP_X_FORWARDED_PROTO'] === 'https') { \$_SERVER['HTTPS'] = 'on'; }" \
     --allow-root >/dev/null
+
+# WP_CACHE_KEY_SALT trennt die Redis-Schlüssel der Sites. wp-cli ab 2.x schreibt ihn mit
+# den übrigen Salts selbst (zufällig je Site); ein zweites define über --extra-php wäre
+# wirkungslos und warnt bei jedem Request. Nur nachtragen, wenn er fehlt (ältere wp-cli).
+if ! sudo -u "$SYSTEM_USER" wp config has WP_CACHE_KEY_SALT --path="$SITE_PATH" --allow-root 2>/dev/null; then
+    sudo -u "$SYSTEM_USER" wp config set WP_CACHE_KEY_SALT "${DOMAIN}:" --path="$SITE_PATH" --allow-root >/dev/null
+fi
 
 # Lizenzschlüssel nicht über --extra-php (argv → sudo-Log), sondern per Bash vor die
 # "That's all"-Zeile der wp-config.php schreiben (stdin ist schon durch --prompt belegt).
@@ -600,6 +606,9 @@ else
     sudo -u "$SYSTEM_USER" wp language core install "$WP_LOCALE"         --path="$SITE_PATH" --allow-root 2>/dev/null || true
     sudo -u "$SYSTEM_USER" wp site switch-language "$WP_LOCALE"          --path="$SITE_PATH" --allow-root \
         || err "Sprachpaket ${WP_LOCALE} für WordPress nicht installierbar (Locale-Code prüfen, wordpress.org erreichbar?)"
+    # Das lokalisierte Download-Paket setzt $wp_local_package, get_locale liefert dann schon
+    # die Sprache und switch-language schreibt WPLANG nie. Deshalb ausdrücklich setzen.
+    sudo -u "$SYSTEM_USER" wp option update WPLANG "$WP_LOCALE"         --path="$SITE_PATH" --allow-root
 fi
 sudo -u "$SYSTEM_USER" wp rewrite structure "/%category%/%postname%/"    --path="$SITE_PATH" --allow-root
 sudo -u "$SYSTEM_USER" wp rewrite flush                                  --path="$SITE_PATH" --allow-root
