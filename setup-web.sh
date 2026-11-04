@@ -1048,33 +1048,39 @@ for f in "\${SITES_DIR}"/*.txt; do
 
     [[ -d "\$CONTENT_PATH" ]] || continue
 
+    # tar-Fehlermeldungen ins Log statt nach /dev/null. tar-Exit 1 = "Datei beim Lesen
+    # geaendert" (laufende Site): Archiv ist vollstaendig, nur Warnung statt Fehler/Alarm.
     if \$ENCRYPT; then
         ARCHIVE="\${BACKUP_DIR}/\${DOMAIN}_\${DATE}.tar.gz.age"
-        if tar -czf - \
+        set +e
+        tar -czf - \
             --exclude="\${CONTENT_PATH}/cache" \
             --exclude="\${CONTENT_PATH}/upgrade" \
             --exclude="\${CONTENT_PATH}/wflogs" \
-            -C "\$SITE_PATH" wp-content 2>/dev/null \
-            | age -R "\$RECIPIENT_FILE" -o "\$ARCHIVE" 2>/dev/null; then
-            SIZE=\$(du -sh "\$ARCHIVE" 2>/dev/null | cut -f1)
-            echo "[\$(date '+%Y-%m-%d %H:%M')] OK \${DOMAIN} (\${SIZE}, verschlüsselt)" >> "\$LOG"
-        else
-            echo "[\$(date '+%Y-%m-%d %H:%M')] FEHLER \${DOMAIN}" >> "\$LOG"
-            ERRORS=\$((ERRORS + 1))
-        fi
+            -C "\$SITE_PATH" wp-content 2>>"\$LOG" \
+            | age -R "\$RECIPIENT_FILE" -o "\$ARCHIVE" 2>>"\$LOG"
+        RC=("\${PIPESTATUS[@]}")
+        set -e
+        TAR_RC=\${RC[0]}; OUT_RC=\${RC[1]}; ART=", verschlüsselt"
     else
         ARCHIVE="\${BACKUP_DIR}/\${DOMAIN}_\${DATE}.tar.gz"
-        if tar -czf "\$ARCHIVE" \
+        set +e
+        tar -czf "\$ARCHIVE" \
             --exclude="\${CONTENT_PATH}/cache" \
             --exclude="\${CONTENT_PATH}/upgrade" \
             --exclude="\${CONTENT_PATH}/wflogs" \
-            -C "\$SITE_PATH" wp-content 2>/dev/null; then
-            SIZE=\$(du -sh "\$ARCHIVE" 2>/dev/null | cut -f1)
-            echo "[\$(date '+%Y-%m-%d %H:%M')] OK \${DOMAIN} (\${SIZE})" >> "\$LOG"
-        else
-            echo "[\$(date '+%Y-%m-%d %H:%M')] FEHLER \${DOMAIN}" >> "\$LOG"
-            ERRORS=\$((ERRORS + 1))
-        fi
+            -C "\$SITE_PATH" wp-content 2>>"\$LOG"
+        TAR_RC=\$?
+        set -e
+        OUT_RC=0; ART=""
+    fi
+    if [[ \$OUT_RC -eq 0 && \$TAR_RC -le 1 ]]; then
+        SIZE=\$(du -sh "\$ARCHIVE" 2>/dev/null | cut -f1)
+        WARN=""; [[ \$TAR_RC -eq 1 ]] && WARN=" WARNUNG: Dateien beim Lesen geaendert"
+        echo "[\$(date '+%Y-%m-%d %H:%M')] OK \${DOMAIN} (\${SIZE}\${ART})\${WARN}" >> "\$LOG"
+    else
+        echo "[\$(date '+%Y-%m-%d %H:%M')] FEHLER \${DOMAIN} (tar=\${TAR_RC}, ausgabe=\${OUT_RC})" >> "\$LOG"
+        ERRORS=\$((ERRORS + 1))
     fi
 done
 
