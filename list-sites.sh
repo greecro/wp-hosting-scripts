@@ -84,7 +84,6 @@ echo -e "  ${BOLD}VM-Status:${NC}"
 echo -e "  Nginx:      $(systemctl is-active nginx       2>/dev/null | sed 's/active/\x1b[32m✓ aktiv\x1b[0m/' | sed 's/inactive/\x1b[31m✗ inaktiv\x1b[0m/')"
 echo -e "  PHP-FPM:    $(systemctl is-active php8.3-fpm  2>/dev/null | sed 's/active/\x1b[32m✓ aktiv\x1b[0m/' | sed 's/inactive/\x1b[31m✗ inaktiv\x1b[0m/')"
 echo -e "  Redis:      $(systemctl is-active redis-server 2>/dev/null | sed 's/active/\x1b[32m✓ aktiv\x1b[0m/' | sed 's/inactive/\x1b[31m✗ inaktiv\x1b[0m/')"
-echo -e "  Netdata:    $(systemctl is-active netdata      2>/dev/null | sed 's/active/\x1b[32m✓ aktiv\x1b[0m/' | sed 's/inactive/\x1b[31m✗ inaktiv\x1b[0m/')"
 echo -e "  VM-Typ:     ${BOLD}${VM_TYPE}${NC} | DB-Host: ${BOLD}${DB_HOST}${NC}"
 echo ""
 

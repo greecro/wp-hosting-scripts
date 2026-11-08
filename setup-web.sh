@@ -914,39 +914,6 @@ else
     info "Kein Dashy-Zugang (DASHY_PUB_KEY/DASHY_FROM leer) — später: setup-dashy-access.sh"
 fi
 
-# ── Netdata ───────────────────────────────────────────────────────────────
-# Nur Agent-Install + Loopback-Bind. Die Parent-Child-Stream-Config wird bewusst
-# NICHT hier gesetzt, sondern zentral über das proxmox-netdata-Repo
-# (configure-netdata-child.sh) ausgerollt. Loopback-Bind, damit :19999 nicht im
-# VLAN offen steht (Streaming zum Parent ist outbound).
-if systemctl is-active --quiet netdata 2>/dev/null; then
-    log "Netdata bereits installiert"
-else
-    info "Netdata wird installiert..."
-    wget -qO /tmp/netdata-kickstart.sh https://get.netdata.cloud/kickstart.sh
-    bash /tmp/netdata-kickstart.sh --non-interactive --stable-channel --disable-telemetry 2>&1 | tail -5 || true
-    rm -f /tmp/netdata-kickstart.sh
-    log "Netdata installiert (Port 19999, Loopback)"
-fi
-# Web-UI strikt auf Loopback binden (idempotent). Ein minimales netdata.conf mergt mit
-# den compiled Defaults — nur [web]-Bind + [health] werden überschrieben.
-# WICHTIG: moderne netdata-Syntax "bind to" verwenden — das veraltete
-# "bind socket to IP" ignorieren aktuelle Versionen, dann bindet netdata weiter
-# auf 0.0.0.0 (:19999 im VLAN offen). [health]=no: Children alarmieren nicht
-# lokal, das übernimmt der Parent (konsistent mit configure-netdata-child.sh).
-if command -v netdata &>/dev/null && ! grep -qs "bind to = 127.0.0.1" /etc/netdata/netdata.conf; then
-    mkdir -p /etc/netdata
-    cat > /etc/netdata/netdata.conf <<'NDEOF'
-[web]
-    bind to = 127.0.0.1
-    allow connections from = localhost
-[health]
-    enabled = no
-NDEOF
-    systemctl restart netdata 2>/dev/null || true
-    log "Netdata Web-UI auf 127.0.0.1 gebunden"
-fi
-
 # ── UFW ───────────────────────────────────────────────────────────────────
 ufw --force reset
 ufw default deny incoming
@@ -958,13 +925,8 @@ ufw allow from "$NPM_IP" to any port 80
 # phpMyAdmin + Filebrowser nur vom NPM erreichbar
 ufw allow from "$NPM_IP" to any port 8080
 ufw allow from "$NPM_IP" to any port 8090
-# Netdata streamt OUTBOUND zum Parent; inbound 19999 NICHT weltoffen öffnen.
-# Nur freigeben, wenn ein Monitoring-Parent gesetzt ist (NETDATA_PARENT_IP, optional).
-if [[ -n "${NETDATA_PARENT_IP:-}" ]]; then
-    ufw allow from "$NETDATA_PARENT_IP" to any port 19999
-fi
 ufw --force enable
-log "Firewall konfiguriert (22 offen | 80+8080+8090 nur von NPM: ${NPM_IP}${NETDATA_PARENT_IP:+ | 19999 nur von ${NETDATA_PARENT_IP}})"
+log "Firewall konfiguriert (22 offen | 80+8080+8090 nur von NPM: ${NPM_IP})"
 
 # ── Verzeichnisstruktur ───────────────────────────────────────────────────
 mkdir -p /var/www
@@ -1439,7 +1401,6 @@ else
 fi
 # Passwörter bewusst nicht im Terminal (Scrollback/Mitschnitt) — Werte nur in der 600-Datei.
 echo ""
-echo -e "  Netdata:       ${BOLD}http://$(hostname -I | awk '{print $1}'):19999${NC}"
 echo -e "  Konfiguration: ${BOLD}/etc/wp-hosting/config${NC}"
 echo -e "  Sites:         ${BOLD}/etc/wp-hosting/sites/<domain>.txt${NC}"
 echo -e "  Datei-Backup:  ${BOLD}${BACKUP_LOCAL}${NC} (täglich 02:00)"

@@ -353,12 +353,8 @@ for VM_IP in "${VM_IPS[@]}"; do
     log "UFW: MySQL-Zugriff von ${VM_IP} erlaubt"
 done
 
-# Netdata streamt OUTBOUND zum Parent; 19999 NICHT weltoffen. Nur für Parent öffnen.
-if [[ -n "${NETDATA_PARENT_IP:-}" ]]; then
-    ufw allow from "$NETDATA_PARENT_IP" to any port 19999
-fi
 ufw --force enable
-log "Firewall konfiguriert (22, 3306 von Web-VMs${NETDATA_PARENT_IP:+, 19999 nur von ${NETDATA_PARENT_IP}})"
+log "Firewall konfiguriert (22, 3306 von Web-VMs)"
 
 # ── SSH Hardening (per Drop-in — Ubuntu includet sshd_config.d/*.conf zuerst;
 #    ein 01-* gewinnt per first-match-wins über 50-cloud-init.conf) ──────────
@@ -392,29 +388,6 @@ if sshd -t 2>/dev/null; then
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || warn "SSH-Neustart fehlgeschlagen"
 else
     warn "sshd-Config-Test (sshd -t) fehlgeschlagen — SSH NICHT neu gestartet (Härtung liegt in ${SSHD_DROPIN})."
-fi
-
-# ── Netdata ───────────────────────────────────────────────────────────────
-# Nur Agent-Install + Loopback-Bind. Parent-Child-Stream-Config kommt zentral über
-# proxmox-netdata (configure-netdata-child.sh). Loopback, damit :19999 nicht offen steht.
-if systemctl is-active --quiet netdata 2>/dev/null; then
-    log "Netdata bereits installiert"
-else
-    info "Netdata wird installiert..."
-    wget -qO /tmp/netdata-kickstart.sh https://get.netdata.cloud/kickstart.sh
-    bash /tmp/netdata-kickstart.sh --non-interactive --stable-channel --disable-telemetry 2>&1 | tail -5 || true
-    rm -f /tmp/netdata-kickstart.sh
-    log "Netdata installiert (Port 19999, Loopback)"
-fi
-# Web-UI strikt auf Loopback binden (idempotent) — minimales netdata.conf mergt mit Defaults
-if command -v netdata &>/dev/null && ! grep -qs "bind socket to IP = 127.0.0.1" /etc/netdata/netdata.conf; then
-    mkdir -p /etc/netdata
-    cat > /etc/netdata/netdata.conf <<'NDEOF'
-[web]
-    bind socket to IP = 127.0.0.1
-NDEOF
-    systemctl restart netdata 2>/dev/null || true
-    log "Netdata Web-UI auf 127.0.0.1 gebunden"
 fi
 
 # ── MariaDB Backup-Cron ────────────────────────────────────────────────────
@@ -637,9 +610,7 @@ DB_ADMIN_USER=${ADMIN_USER}
 DB_ADMIN_PASS=${ADMIN_PASS}
 EOF
 chmod 600 /etc/wp-hosting/db-credentials.txt
-echo -e "  Netdata:       ${BOLD}http://$(hostname -I | awk '{print $1}'):19999${NC}"
 echo ""
 echo -e "${YELLOW}  → Zugangsdaten gespeichert: /etc/wp-hosting/db-credentials.txt${NC}"
 echo -e "${YELLOW}  → Passwort von dort nach 1Password übernehmen (chmod 600, nur root).${NC}"
-echo -e "${YELLOW}  → Netdata in Uptime Kuma als Monitor hinzufügen.${NC}"
 echo ""

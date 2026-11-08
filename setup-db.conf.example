@@ -40,10 +40,6 @@ R2_BUCKET=db-backups
 # SFTP_PATH=/backups
 # SFTP_PORT=22                # SSH-Key /root/.ssh/id_rsa muss am Ziel hinterlegt sein
 
-# ── Monitoring (optional): IP des Netdata-Parents. Nur wenn gesetzt wird Port
-#    19999 in der Firewall für genau diese Quelle geöffnet (sonst bleibt 19999 zu). ──
-NETDATA_PARENT_IP=
-
 # ── SSH Public Key für ubuntu-User (optional; wegen Leerzeichen IMMER quoten) ──
 # Gesetzt → Passwort-Login wird global deaktiviert. Beispiel:
 # SSH_PUB_KEY="ssh-ed25519 AAAA... user@host"

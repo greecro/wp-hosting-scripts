@@ -45,11 +45,9 @@ Internet → Cloudflare → Caddy (SSL)
                  Redis 512mb
                  phpMyAdmin :8080
                  Filebrowser :8090
-                 Netdata :19999
                        ↓
                  Datenbank-VM (gemeinsam)
                     MariaDB
-                 Netdata :19999
 ```
 
 ---

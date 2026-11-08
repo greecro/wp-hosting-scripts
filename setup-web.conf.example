@@ -73,10 +73,6 @@ MEDIA_BUCKET=media
 DASHY_PUB_KEY=""
 DASHY_FROM=
 
-# ── Monitoring (optional): IP des Netdata-Parents. Nur wenn gesetzt wird Port
-#    19999 in der Firewall für genau diese Quelle geöffnet (sonst bleibt 19999 zu). ──
-NETDATA_PARENT_IP=
-
 # ── age-Backup-Verschlüsselung: true | false ──
 ENABLE_AGE=false
 
