@@ -296,6 +296,11 @@ access_key_id = ${R2_KEY_ID}
 secret_access_key = ${R2_KEY_SECRET}
 endpoint = https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com
 acl = private
+# R2: Token ist auf ein Prefix beschraenkt (kein Bucket-Check erlaubt), und rclone 1.60
+# fragt nach jedem Upload per HEAD mit versionId nach -> R2 "NotImplemented", Versuch 1
+# scheitert jedes Mal. Integritaet sichert Content-MD5 beim PUT (real 2026-11-09).
+no_check_bucket = true
+no_head = true
 EOF
             ;;
         2) cat > /root/.config/rclone/rclone.conf <<EOF
