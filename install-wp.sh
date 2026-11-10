@@ -1026,16 +1026,27 @@ add_action('wp_dashboard_setup', function () {
 }, 99);
 MUPLUGIN
 
-# Blocksy-Footer: Standard-Copyright auf den Site-Titel statt "WordPress Theme by
+# Blocksy-Footer: Standard-Copyright mit Markenhinweis statt "WordPress Theme by
 # Creative Themes". Greift nur, solange im Customizer nichts anderes gesetzt ist.
+# Marke aus der Option wph_brand_name (setzen: wp option update wph_brand_name "<Marke>"),
+# sonst Site-Titel. Englischer Text bei en_*-Locale (auch TranslatePress-EN-Seiten).
+# {current_year} ersetzt Blocksy beim Rendern — das Jahr ist damit dynamisch.
 cat > "${SITE_PATH}/wp-content/mu-plugins/footer-copyright.php" <<'MUPLUGIN'
 <?php
 /**
  * Plugin Name: Footer Copyright
- * Description: Blocksy-Footer-Copyright-Standard: Jahr + Site-Titel statt Theme-Werbung.
+ * Description: Blocksy-Footer-Copyright-Standard: Jahr + Marke + Holding-Hinweis statt Theme-Werbung.
  */
 add_filter('blocksy:footer:copyright:default-value', function () {
-    return 'Copyright &copy; {current_year} &ndash; {site_title}';
+    $brand = trim((string) get_option('wph_brand_name', ''));
+    if ($brand === '') {
+        $brand = get_bloginfo('name');
+    }
+    $brand = esc_html($brand);
+    if (strpos(determine_locale(), 'en') === 0) {
+        return "&copy; {current_year} {$brand} is a brand of Janzin Holding, owner Danijel Janzin";
+    }
+    return "&copy; {current_year} {$brand} ist ein Brand der Janzin Holding, Inh. Danijel Janzin";
 });
 MUPLUGIN
 
