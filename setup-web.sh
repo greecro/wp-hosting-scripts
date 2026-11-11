@@ -580,8 +580,11 @@ rm -f /etc/nginx/sites-enabled/default
 log "Nginx konfiguriert"
 
 # ── Log-Rotation ──────────────────────────────────────────────────────────
+# Nur /var/log/php: /var/log/nginx/*.log rotiert schon /etc/logrotate.d/nginx aus dem
+# Paket (taeglich, 14 Stueck). Ein zweiter Eintrag dafuer laesst logrotate mit
+# "duplicate log entry" und Exit 1 enden (real 2026-11-04 bis 11-11 auf vm-woo-01).
 cat > /etc/logrotate.d/wordpress-hosting <<'EOF'
-/var/log/nginx/*.log /var/log/php/*.log {
+/var/log/php/*.log {
     daily
     rotate 14
     compress
@@ -591,7 +594,6 @@ cat > /etc/logrotate.d/wordpress-hosting <<'EOF'
     create 0640 www-data adm
     sharedscripts
     postrotate
-        nginx -s reopen 2>/dev/null || true
         systemctl reload php8.3-fpm 2>/dev/null || true
     endscript
 }
