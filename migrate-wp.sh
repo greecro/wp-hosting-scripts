@@ -295,7 +295,7 @@ server {
     location / { try_files \$uri \$uri/ /index.php?\$args; }
 
     # Sperren VOR dem PHP-Block: nginx nimmt die erste passende Regex-Location (WPHO-190)
-    location ~ /\.(ht|git|env)                 { deny all; }
+    location ~ /\.(?!well-known/)              { deny all; }
     location ~* /wp-config[^/]*\$                { deny all; }
     location ~ /(readme\.html|license\.txt)\$   { deny all; }
     location ~* /(?:uploads|files)/.*\.php\$     { deny all; }
