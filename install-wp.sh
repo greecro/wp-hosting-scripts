@@ -1924,6 +1924,149 @@ add_action( 'template_redirect', function () {
 }, 1 );
 MUPLUGIN
     log "Must-Use Plugin: Clarity-Maskierung sensibler Shopseiten"
+
+    # Löschanträge: sperren statt löschen (Sperrvermerk an den Bestellungen, FSLM-Inhaber leeren,
+    # Kundenkonto löschen; gesperrte Bestellungen nicht an BaseSend). Nur bestätigte Einzelanträge.
+    cat > "${SITE_PATH}/wp-content/mu-plugins/privacy-erasure.php" <<'MUPLUGIN'
+<?php
+/**
+ * Plugin Name: Löschanträge: sperren statt löschen
+ * Description: Ergänzt den WordPress-Löschlauf (Werkzeuge > Personenbezogene Daten löschen) für einen einzelnen, vom Kunden bestätigten Antrag: Sperrvermerk an jeder Bestellung, Inhaberfelder der Lizenzschlüssel leeren, Kundenkonto löschen (Bestellungen bleiben als Gast). Gesperrte Bestellungen gehen nicht mehr an BaseSend.
+ *
+ * Ablauf: Der Hook wp_privacy_personal_data_erased feuert einmal je Antrag, nachdem alle Löschroutinen
+ * gelaufen sind. WooCommerce lässt die Bestellungen dabei stehen (Option "Bestellungen bei Löschanfragen
+ * entfernen" = nein); dieses Plugin sperrt sie. Nur bestätigte Anträge (Kunde hat den Link in der
+ * Bestätigungsmail geklickt), jeder Antrag nur einmal. Nie massenhaft: kein eigener Lauf über Bestände.
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+const WPH_ERASURE_META = 'wph_erasure_blocked';
+
+add_action( 'wp_privacy_personal_data_erased', 'wph_erasure_block', 10, 1 );
+
+function wph_erasure_log( string $message ): void {
+    if ( function_exists( 'wc_get_logger' ) ) {
+        wc_get_logger()->info( $message, array( 'source' => 'wph-privacy' ) );
+    }
+}
+
+function wph_erasure_block( $request_id ): void {
+    if ( ! class_exists( 'WooCommerce' ) ) {
+        return;
+    }
+    $request_id = (int) $request_id;
+    $request    = wp_get_user_request( $request_id );
+    if ( ! $request || 'remove_personal_data' !== $request->action_name ) {
+        return;
+    }
+    if ( get_post_meta( $request_id, '_wph_erasure_done', true ) ) {
+        return;
+    }
+    if ( ! get_post_meta( $request_id, '_wp_user_request_confirmed_timestamp', true ) ) {
+        wph_erasure_log( "Löschantrag #{$request_id}: nicht vom Kunden bestätigt, keine Sperre gesetzt." );
+        return;
+    }
+    $email = strtolower( trim( (string) $request->email ) );
+    if ( ! is_email( $email ) ) {
+        return;
+    }
+
+    // Alle Bestellungen des Kunden: per Rechnungs-E-Mail und per Kundenkonto.
+    $user     = get_user_by( 'email', $email );
+    $statuses = array_keys( wc_get_order_statuses() );
+    $ids      = wc_get_orders( array( 'type' => 'shop_order', 'billing_email' => $email, 'status' => $statuses, 'limit' => -1, 'return' => 'ids' ) );
+    if ( $user ) {
+        $ids = array_merge( $ids, wc_get_orders( array( 'type' => 'shop_order', 'customer_id' => $user->ID, 'status' => $statuses, 'limit' => -1, 'return' => 'ids' ) ) );
+    }
+    $ids = array_values( array_unique( array_map( 'intval', $ids ) ) );
+
+    // 1. Sperrvermerk (interne Notiz + Meta); Bestellungen vom Konto lösen, sie bleiben als Gast.
+    $date = wp_date( 'd.m.Y' );
+    $note = sprintf(
+        'Löschantrag vom %1$s (Antrag #%2$d): Die personenbezogenen Daten dieser Bestellung sind gesperrt. Verwendung nur noch zur Erfüllung gesetzlicher Aufbewahrungspflichten; Löschung nach Ablauf der Aufbewahrungsfrist.',
+        $date,
+        $request_id
+    );
+    foreach ( $ids as $id ) {
+        $order = wc_get_order( $id );
+        if ( ! $order || '' !== (string) $order->get_meta( WPH_ERASURE_META, true ) ) {
+            continue;
+        }
+        $order->update_meta_data( WPH_ERASURE_META, wp_date( 'Y-m-d' ) . ' #' . $request_id );
+        if ( $user && (int) $order->get_customer_id() === (int) $user->ID ) {
+            $order->set_customer_id( 0 );
+        }
+        $order->save();
+        $order->add_order_note( $note, 0, false );
+    }
+
+    // 2. Lizenzschlüssel (FS License Manager): Inhaberfelder leeren, Schlüssel und Bestellbezug bleiben.
+    global $wpdb;
+    $keys  = 0;
+    $table = $wpdb->prefix . 'wc_fs_product_licenses_keys';
+    if ( $table === $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) ) {
+        $where = $wpdb->prepare( 'LOWER(owner_email_address) = %s', $email );
+        if ( $ids ) {
+            $where .= ' OR order_id IN (' . implode( ',', $ids ) . ')';
+        }
+        $keys = (int) $wpdb->query( "UPDATE {$table} SET owner_first_name = '', owner_last_name = '', owner_email_address = '' WHERE {$where}" ); // phpcs:ignore WordPress.DB.PreparedSQL
+    }
+
+    // 3. Kundenkonto löschen, nur reine Kundenkonten (nie Admin, Shop-Manager, Redakteur).
+    $account = 'kein Konto';
+    if ( $user ) {
+        $allowed = array( 'customer', 'subscriber' );
+        if ( array_diff( (array) $user->roles, $allowed ) || user_can( $user, 'manage_woocommerce' ) ) {
+            $account = 'Konto behalten (Rolle ' . implode( ',', (array) $user->roles ) . ')';
+        } else {
+            require_once ABSPATH . 'wp-admin/includes/user.php';
+            $account = wp_delete_user( $user->ID ) ? 'Konto gelöscht' : 'Konto NICHT gelöscht';
+        }
+    }
+
+    update_post_meta( $request_id, '_wph_erasure_done', time() );
+    wph_erasure_log( sprintf( 'Löschantrag #%d: %d Bestellungen gesperrt, %d Lizenzschlüssel geleert, %s.', $request_id, count( $ids ), $keys, $account ) );
+}
+
+/*
+ * Gesperrte Bestellungen gehen nicht an BaseSend. Das Plugin BaseSend hat dafür keinen Filter, daher:
+ * - Push (Action basend_push_order): für eine gesperrte Bestellung den BaseSend-Callback für diesen
+ *   einen Aufruf aushängen und danach wieder einhängen.
+ * - Abruf (REST basend/v1/orders, wc_get_orders): während dieser Anfrage gesperrte Bestellungen per
+ *   meta_query ausschließen.
+ */
+add_action( 'basend_push_order', function ( $order_id ) {
+    if ( ! class_exists( 'Basend_Orders' ) ) {
+        return;
+    }
+    $order = wc_get_order( (int) $order_id );
+    if ( $order && '' !== (string) $order->get_meta( WPH_ERASURE_META, true ) ) {
+        remove_action( 'basend_push_order', array( 'Basend_Orders', 'push' ), 10 );
+        add_action( 'basend_push_order', 'wph_erasure_restore_basend_push', 11 );
+    }
+}, 9 );
+
+function wph_erasure_restore_basend_push(): void {
+    remove_action( 'basend_push_order', 'wph_erasure_restore_basend_push', 11 );
+    add_action( 'basend_push_order', array( 'Basend_Orders', 'push' ), 10, 1 );
+}
+
+add_filter( 'rest_request_before_callbacks', function ( $response, $handler, $request ) {
+    if ( $request instanceof WP_REST_Request && 0 === strpos( $request->get_route(), '/basend/v1/orders' ) ) {
+        add_filter( 'woocommerce_order_query_args', 'wph_erasure_exclude_blocked' );
+    }
+    return $response;
+}, 10, 3 );
+
+function wph_erasure_exclude_blocked( $args ) {
+    $meta_query           = isset( $args['meta_query'] ) && is_array( $args['meta_query'] ) ? $args['meta_query'] : array();
+    $meta_query[]         = array( 'key' => WPH_ERASURE_META, 'compare' => 'NOT EXISTS' );
+    $args['meta_query']   = $meta_query;
+    return $args;
+}
+MUPLUGIN
+    log "Must-Use Plugin: Löschanträge sperren statt löschen"
 fi
 
 # ── Must-Use Plugin: Maintenance Mode ────────────────────────────────────
