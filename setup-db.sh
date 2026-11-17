@@ -301,6 +301,11 @@ open_files_limit              = 65535
 bind-address                  = 0.0.0.0
 EOF
 
+# Slow-Log-Verzeichnis: das Ubuntu-Paket legt /var/log/mysql nicht an. Ohne es
+# schaltet MariaDB das Slow-Log beim Start still ab (real 2026-11-17, vm-db-01/02).
+install -d -o mysql -g adm -m 2750 /var/log/mysql
+[ -e /var/log/mysql/slow.log ] || install -o mysql -g adm -m 640 /dev/null /var/log/mysql/slow.log
+
 # systemd-Limits anpassen (sonst greift open_files_limit nicht)
 mkdir -p /etc/systemd/system/mariadb.service.d
 cat > /etc/systemd/system/mariadb.service.d/limits.conf <<EOF
