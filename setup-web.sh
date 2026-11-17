@@ -1159,6 +1159,19 @@ if [[ -f "$(dirname "$0")/sync-media.sh" ]]; then
     log "sync-media.sh installiert (/usr/local/bin, Logo/Favicon aus media/<domain>/)"
 fi
 
+# Aufbewahrungsfristen für Bestellungen (WooCommerce-Sites, HPOS). Ohne --apply zählen beide nur.
+# - order-ip-purge.sh: IP-Adresse und Browserkennung 120 Tage nach Bestelldatum leeren, täglich per Cron.
+# - order-anonymize.sh: Bestellungen nach Ablauf der Buchungsbeleg-Frist anonymisieren (Jahreslauf, von Hand:
+#   erst Trockenlauf mit Zählung je Bezugsjahr, dann --apply --max-year <JJJJ>). Kein Cron.
+if [[ -f "$(dirname "$0")/order-ip-purge.sh" && -f "$(dirname "$0")/order-anonymize.sh" ]]; then
+    install -D -m 755 "$(dirname "$0")/order-ip-purge.sh" /usr/local/bin/order-ip-purge.sh
+    install -D -m 644 "$(dirname "$0")/order-ip-purge.php" /usr/local/lib/wp-hosting/order-ip-purge.php
+    install -D -m 755 "$(dirname "$0")/order-anonymize.sh" /usr/local/bin/order-anonymize.sh
+    install -D -m 644 "$(dirname "$0")/order-anonymize.php" /usr/local/lib/wp-hosting/order-anonymize.php
+    echo "30 3 * * * root /usr/bin/flock -n /var/lock/wp-order-ip-purge.lock /usr/local/bin/order-ip-purge.sh --all --apply --quiet --notify" > /etc/cron.d/order-ip-purge
+    log "Bestell-Fristen eingerichtet (IP/Browserkennung täglich 03:30 → /var/log/wp-order-retention.log; Anonymisierung von Hand)"
+fi
+
 # Maintenance-Mode-Umschalter auf die VM legen (kein Cron — wird von Hand bzw. von
 # deploy-site.sh --go-live aufgerufen). Ohne das lag das Script nur im Repo und der
 # Wartungsmodus musste per rm auf dem Flag aufgehoben werden.

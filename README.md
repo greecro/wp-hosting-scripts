@@ -78,6 +78,8 @@ Internet → Cloudflare → Caddy (SSL)
 | `sync-plugins.sh` | Web-VM | Private Plugin-ZIPs (SEOpress Pro etc.) aus Plugin-Bucket nachladen | Bei Plugin-Update |
 | `db-backup.sh` | Datenbank-VM | Manueller MariaDB-Dump (Encryption + Remote-Mirror wie Auto-Cron, flock-protected) | Bei Bedarf |
 | `db-cleanup.sh` | Web-VM | DB-Cleanup aller Sites: Transients, Papierkorb, Spam, Action Scheduler, OPTIMIZE TABLE | Wöchentlich (Cron So 05:00) |
+| `order-ip-purge.sh` | Web-VM | IP-Adresse und Browserkennung in Bestellungen 120 Tage nach Bestelldatum leeren (Standard: nur zählen, `--apply` schreibt) | Täglich (Cron 03:30) |
+| `order-anonymize.sh` | Web-VM | Bestellungen nach Ablauf der Aufbewahrungsfrist anonymisieren, Zählung je Bezugsjahr, `--apply` verlangt `--max-year` | Jährlich, von Hand |
 | `setup-dashy-access.sh` | Web-VM | Zugang für ein Management-Dashboard: User `dashy`, restriktiver Key, ForceCommand-Gate (`dashy-gate`), Read-only-wp-cli-Wrapper (`dashy-wp`), Read-only-WooCommerce-Reports mit fester SQL (`dashy-wc`: Tagesumsatz, Status, Top-Produkte) und Site-Registry als JSON (`dashy-sites`) und Einzel-Update eines Plugins/Themes/des Cores mit Snapshot und Rollback, wahlweise mit DB-Import (`dashy-wp-update`, Snapshots unter `/var/backups/wp-hosting/<domain>/`); wird von `setup-web.sh` aufgerufen, wenn `DASHY_PUB_KEY`/`DASHY_FROM` gesetzt sind | Einmalig pro VM |
 | `check-dns.sh` | beliebig | DNS-/Mail-Readiness prüfen (A, www, SPF, DMARC, SES-DKIM) — eine oder mehrere Domains | Vor Anlage |
 
@@ -276,6 +278,12 @@ sudo bash maintenance.sh
   - **Pixel Manager** (`woocommerce-google-adwords-conversion-tracking-tag`, Free + `pixel-manager-pro.zip`) — **ein** Pixel-Tool für alle Ad-Plattformen (Google Ads, Meta, TikTok, Pinterest, Bing) + Server-Side CAPI. Ersetzt Google Tag Manager. Consent-gated über FAZ.
   - **Analytics = Matomo** via SEOpress-Modul (cookieless, consent-frei) **plus GA4** (seit 2026-10-15 über den Pixel Manager; die Measurement-ID trägt `provision-endpoint.sh` ein, FAZ blockt bis zum Opt-in). **Kein GTM.**
   - Keine offiziellen Channel-Plugins (redundant durch PMW+PFM), kein buggy Pinterest-Plugin.
+
+### Aufbewahrungsfristen für Bestellungen (WooCommerce, HPOS)
+- **IP und Browserkennung:** `order-ip-purge.sh` leert `ip_address`/`user_agent` und die gleichwertigen Meta-Felder (Order Attribution, Matomo) 120 Tage nach Bestelldatum (Chargeback-Fenster). Die Bestellung bleibt.
+- **Anonymisierung:** `order-anonymize.sh` anonymisiert über `WC_Privacy_Erasers`, wenn das Bezugsjahr (jüngstes Datum aus Bestellung, Zahlung, Abschluss, Erstattung, Rechnung) ≤ laufendes Jahr − 9 ist. `--max-year` senkt die Grenze, ohne `--apply` wird nur gezählt. Ausgenommen: Meta `wph_retention_hold`, Bestellungen mit Rechnungsnummer und die IDs in `/etc/wp-hosting/retention-hold-<domain>.txt`. Dazu werden die FSLM-Inhaberfelder dieser Bestellungen geleert.
+- Beide schreiben nur Zahlen ins Protokoll (`/var/log/wp-order-retention.log`), nie Personendaten, und überspringen Sites ohne HPOS, solange sie keine Bestellungen haben.
+- Wer ein Plugin dranhängen will: Action `wph_order_retention_anonymize( $order_id )` (nur mit `--basend`).
 
 > 📡 **Tracking/Consent-Details + Pro-Shop-Checkliste:** siehe [`docs/tracking-consent.md`](docs/tracking-consent.md)
 
