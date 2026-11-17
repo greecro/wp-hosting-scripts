@@ -295,6 +295,8 @@ server {
     if (\$request_method = POST)                                          { set \$skip_cache 1; }
     if (\$query_string != "")                                             { set \$skip_cache 1; }
     if (\$request_uri ~* "/cart|/checkout|/my-account|/wc-api|/wp-admin|\?wc-ajax=|/feed") { set \$skip_cache 1; }
+    # Deutsche WooCommerce-Seitenslugs (de_DE-Standard) und Widerrufsseite
+    if (\$request_uri ~* "/(warenkorb|kasse|mein-konto|vertrag-widerrufen)(/|\?|\$)") { set \$skip_cache 1; }
     if (\$http_cookie ~* "wordpress_logged_in|woocommerce_items_in_cart|woocommerce_cart_hash|wp_woocommerce_session") { set \$skip_cache 1; }
 
     location / { try_files \$uri \$uri/ /index.php?\$args; }
