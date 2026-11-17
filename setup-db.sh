@@ -303,6 +303,9 @@ EOF
 
 # Slow-Log-Verzeichnis: das Ubuntu-Paket legt /var/log/mysql nicht an. Ohne es
 # schaltet MariaDB das Slow-Log beim Start still ab (real 2026-11-17, vm-db-01/02).
+# Rotation: /etc/logrotate.d/mariadb aus dem Paket erfasst /var/log/mysql/*.log schon
+# (monatlich, 6 Generationen, max 500M, flush-slow-log) - KEINE eigene Regel anlegen,
+# ein doppelter Eintrag laesst logrotate komplett abbrechen.
 install -d -o mysql -g adm -m 2750 /var/log/mysql
 [ -e /var/log/mysql/slow.log ] || install -o mysql -g adm -m 640 /dev/null /var/log/mysql/slow.log
 
