@@ -1880,6 +1880,48 @@ function wph_withdrawal_render( array $view ): void {
 }
 MUPLUGIN
     log "Must-Use Plugin: Widerrufsfunktion (§ 356a BGB, /vertrag-widerrufen/)"
+
+    # Clarity maskiert auf Konto, Kasse, Bestellbestätigung, Warenkorb und Widerrufsseite allen Text
+    # (data-clarity-mask am body), unabhängig vom Maskierungsmodus des Clarity-Projekts.
+    cat > "${SITE_PATH}/wp-content/mu-plugins/clarity-mask.php" <<'MUPLUGIN'
+<?php
+/**
+ * Plugin Name: Clarity-Maskierung sensibler Shopseiten
+ * Description: Setzt data-clarity-mask="true" auf das body-Element von Konto, Kasse, Bestellbestätigung, Warenkorb und Widerrufsseite. Microsoft Clarity maskiert dann allen Text dieser Seiten in Aufzeichnungen und Heatmaps.
+ *
+ * Gilt unabhängig vom Maskierungsmodus des Clarity-Projekts (Strict, Balanced, Relaxed). Das Attribut
+ * steht im ausgelieferten HTML und wirkt damit vor dem ersten Snapshot. Ohne WooCommerce tut das Plugin nichts.
+ */
+
+defined( 'ABSPATH' ) || exit;
+
+function wph_clarity_mask_applies(): bool {
+    if ( is_admin() || ! class_exists( 'WooCommerce' ) ) {
+        return false;
+    }
+    // is_checkout() schließt die Bestellbestätigung (order-received) ein.
+    if ( is_account_page() || is_checkout() || is_cart() || is_order_received_page() ) {
+        return true;
+    }
+    // Widerrufsseite aus dem mu-plugin withdrawal-function (Rewrite-Endpunkt, keine WP-Seite).
+    return defined( 'WPH_WITHDRAWAL_QUERY_VAR' ) && (bool) get_query_var( WPH_WITHDRAWAL_QUERY_VAR );
+}
+
+// Priorität 1: vor Plugins, die in template_redirect selbst ausgeben und mit exit enden
+// (withdrawal-function). Offene Puffer leert PHP auch nach exit, der Filter greift also.
+add_action( 'template_redirect', function () {
+    if ( ! wph_clarity_mask_applies() ) {
+        return;
+    }
+    ob_start( function ( $html ) {
+        if ( ! is_string( $html ) || false !== stripos( $html, 'data-clarity-mask' ) ) {
+            return $html;
+        }
+        return preg_replace( '/<body\b([^>]*)>/i', '<body$1 data-clarity-mask="true">', $html, 1 );
+    } );
+}, 1 );
+MUPLUGIN
+    log "Must-Use Plugin: Clarity-Maskierung sensibler Shopseiten"
 fi
 
 # ── Must-Use Plugin: Maintenance Mode ────────────────────────────────────
