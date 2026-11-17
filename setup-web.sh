@@ -601,8 +601,15 @@ log "Nginx konfiguriert"
 
 # ── Log-Rotation ──────────────────────────────────────────────────────────
 # Nur /var/log/php: /var/log/nginx/*.log rotiert schon /etc/logrotate.d/nginx aus dem
-# Paket (taeglich, 14 Stueck). Ein zweiter Eintrag dafuer laesst logrotate mit
-# "duplicate log entry" und Exit 1 enden (real 2026-11-04 bis 11-11 auf vm-woo-01).
+# Paket. Ein zweiter Eintrag dafuer laesst logrotate mit "duplicate log entry" und
+# Exit 1 enden (real 2026-11-04 bis 11-11 auf vm-woo-01).
+# nginx-Logs (mit IP-Adressen) hoechstens 14 Tage: das Paket behaelt 14 rotierte Dateien
+# plus die laufende, also knapp 15 Tage. rotate 13 macht daraus die 14 Tage der
+# Datenschutzerklaerung. Die Datei ist ein dpkg-Conffile, Paket-Updates behalten die Aenderung.
+if [[ -f /etc/logrotate.d/nginx ]]; then
+    sed -i -E 's/^(\s*)rotate [0-9]+$/\1rotate 13/' /etc/logrotate.d/nginx
+    grep -qE '^\s*rotate 13$' /etc/logrotate.d/nginx || warn "logrotate nginx: rotate 13 nicht gesetzt"
+fi
 cat > /etc/logrotate.d/wordpress-hosting <<'EOF'
 /var/log/php/*.log {
     daily
@@ -618,7 +625,7 @@ cat > /etc/logrotate.d/wordpress-hosting <<'EOF'
     endscript
 }
 EOF
-log "Log-Rotation konfiguriert (14 Tage, täglich komprimiert)"
+log "Log-Rotation konfiguriert (nginx und PHP je 14 Tage, täglich komprimiert)"
 
 # ── phpMyAdmin ────────────────────────────────────────────────────────────
 PMA_DIR="/var/www/phpmyadmin"
