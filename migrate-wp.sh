@@ -294,6 +294,12 @@ server {
 
     location / { try_files \$uri \$uri/ /index.php?\$args; }
 
+    # Sperren VOR dem PHP-Block: nginx nimmt die erste passende Regex-Location (WPHO-190)
+    location ~ /\.(ht|git|env)                 { deny all; }
+    location ~* /wp-config[^/]*\$                { deny all; }
+    location ~ /(readme\.html|license\.txt)\$   { deny all; }
+    location ~* /(?:uploads|files)/.*\.php\$     { deny all; }
+
     location ~ \.php\$ {
         include snippets/fastcgi-php.conf;
         fastcgi_pass unix:${SOCK};
@@ -316,9 +322,6 @@ server {
         expires 30d; add_header Cache-Control "public, no-transform"; log_not_found off;
     }
 
-    location ~ /\.(ht|git|env) { deny all; }
-    location ~ /(wp-config\.php|readme\.html|license\.txt|wp-config-sample\.php)\$ { deny all; }
-    location ~* /(?:uploads|files)/.*\.php\$ { deny all; }
     location = /xmlrpc.php     { deny all; }
     location = /wp-login.php   { limit_req zone=login burst=3 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:${SOCK}; include fastcgi_params; }
 }
