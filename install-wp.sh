@@ -948,7 +948,7 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     WIDERRUF_ID=$(sudo -u "$SYSTEM_USER" wp post create \
         --post_type=page --post_title="Widerrufsbelehrung" --post_name="widerrufsbelehrung" \
         --post_status=publish \
-        --post_content="<p><em>[Widerrufsbelehrung fuer digitale Gueter hier einfuegen]</em></p><p>Hinweis: Bei digitalen Produkten erlischt das Widerrufsrecht mit Beginn der Ausfuehrung (Paragraph 356 Abs. 5 BGB).</p><p>Empfehlung: <a href=\"https://www.it-recht-kanzlei.de\">IT-Recht Kanzlei</a></p>" \
+        --post_content="<p><em>[Widerrufsbelehrung fuer digitale Gueter hier einfuegen]</em></p><p>Hinweis: Bei digitalen Produkten erlischt das Widerrufsrecht mit Beginn der Ausfuehrung (Paragraph 356 Abs. 6 BGB).</p><p>Empfehlung: <a href=\"https://www.it-recht-kanzlei.de\">IT-Recht Kanzlei</a></p>" \
         --porcelain --path="$SITE_PATH" --allow-root)
 
     LIEFERUNG_ID=$(sudo -u "$SYSTEM_USER" wp post create \
@@ -1145,23 +1145,41 @@ if [[ "$SITE_TYPE" == "woocommerce" ]]; then
     cat > "${SITE_PATH}/wp-content/mu-plugins/digital-checkout.php" <<'MUPLUGIN'
 <?php
 /**
- * Digital Goods Checkout: Widerrufsrecht-Checkbox (§ 356 Abs. 5 BGB)
+ * Digital Goods Checkout: Widerrufsrecht-Checkbox (§ 356 Abs. 6 BGB, Fassung ab 19.06.2026)
  *
- * Zeigt beim Checkout eine Pflicht-Checkbox an, wenn der Warenkorb
- * downloadbare Produkte enthält. Die Zustimmung wird mit Zeitstempel
- * in der Bestellung gespeichert (Nachweispflicht).
+ * Zeigt beim Checkout eine Pflicht-Checkbox an, wenn der Warenkorb mindestens
+ * ein virtuelles ODER downloadbares Produkt enthält (Lizenzschlüssel-Produkte
+ * sind nur virtuell). Nur physische Produkte: keine Checkbox.
+ *
+ * Zwei Wege, weil WooCommerce zwei Checkouts hat:
+ * - Klassischer Checkout (Shortcode): Checkbox über woocommerce_review_order_before_submit,
+ *   Prüfung über woocommerce_checkout_process.
+ * - Block-Checkout: Additional Checkout Fields API (woocommerce_register_additional_checkout_field,
+ *   Location 'order', Typ checkbox). Pflicht und Sichtbarkeit hängen per JSON-Schema an
+ *   cart.extensions.wph_digital.has_digital — das Flag liefert die Store-API-Erweiterung unten.
+ *   WooCommerce wertet die Regel im Browser UND serverseitig aus (Store API, Warenkorb aus
+ *   der Session, nicht aus dem Request). Bedingte Regeln brauchen WooCommerce >= 9.9.
+ *
+ * Die Zustimmung wird mit Zeitstempel an der Bestellung gespeichert (Meta
+ * _digital_withdrawal_consent, HPOS-kompatibel) und in den Kunden-Mails sowie
+ * in der Bestellansicht im Admin ausgegeben.
  */
 
+const WPH_DIGITAL_CONSENT_FIELD = 'wph/digital-withdrawal-consent';
+const WPH_DIGITAL_CONSENT_META  = '_digital_withdrawal_consent';
+const WPH_DIGITAL_CONSENT_LABEL = 'Ich stimme ausdrücklich zu, dass ihr vor Ablauf der Widerrufsfrist mit der Ausführung des Vertrags beginnt. Mir ist bekannt, dass ich durch meine Zustimmung mit Beginn der Ausführung mein Widerrufsrecht verliere.';
+const WPH_DIGITAL_CONSENT_ERROR = 'Bitte stimme zu, dass wir vor Ablauf der Widerrufsfrist mit der Ausführung beginnen, und bestätige, dass dein Widerrufsrecht damit erlischt.';
+
 /**
- * Prüft ob der aktuelle Warenkorb downloadbare Produkte enthält.
+ * Prüft ob der aktuelle Warenkorb virtuelle oder downloadbare Produkte enthält.
  */
-function _wph_cart_has_downloadable(): bool {
+function _wph_cart_has_digital(): bool {
     if ( ! function_exists( 'WC' ) || ! WC()->cart ) {
         return false;
     }
     foreach ( WC()->cart->get_cart() as $item ) {
         $product = $item['data'] ?? null;
-        if ( $product && $product->is_downloadable() ) {
+        if ( $product && ( $product->is_virtual() || $product->is_downloadable() ) ) {
             return true;
         }
     }
@@ -1169,10 +1187,91 @@ function _wph_cart_has_downloadable(): bool {
 }
 
 /**
- * Checkbox vor dem Bestell-Button anzeigen.
+ * Block-Checkout: Store API liefert im Warenkorb das Flag
+ * extensions.wph_digital.has_digital — Grundlage der Feldregeln unten.
+ */
+add_action( 'woocommerce_blocks_loaded', function () {
+    if ( ! function_exists( 'woocommerce_store_api_register_endpoint_data' ) ) {
+        return;
+    }
+    woocommerce_store_api_register_endpoint_data( array(
+        'endpoint'        => 'cart',
+        'namespace'       => 'wph_digital',
+        'data_callback'   => function () {
+            return array( 'has_digital' => _wph_cart_has_digital() );
+        },
+        'schema_callback' => function () {
+            return array(
+                'has_digital' => array(
+                    'description' => 'Warenkorb enthält virtuelle oder downloadbare Produkte.',
+                    'type'        => 'boolean',
+                    'context'     => array( 'view', 'edit' ),
+                    'readonly'    => true,
+                ),
+            );
+        },
+        'schema_type'     => ARRAY_A,
+    ) );
+} );
+
+/**
+ * Block-Checkout: Checkbox als zusätzliches Bestellfeld. Ausgeblendet nur, wenn der
+ * Warenkorb ausdrücklich has_digital = false meldet; sonst sichtbar und Pflicht.
+ * Fehlt das Flag (Erweiterung nicht geladen), bleibt die Checkbox Pflicht — lieber
+ * einmal zu viel gefragt als eine digitale Bestellung ohne Zustimmung.
+ */
+add_action( 'woocommerce_init', function () {
+    if ( ! function_exists( 'woocommerce_register_additional_checkout_field' ) ) {
+        return;
+    }
+    $cart_not_digital = array(
+        'properties' => array(
+            'extensions' => array(
+                'properties' => array(
+                    'wph_digital' => array(
+                        'properties' => array( 'has_digital' => array( 'const' => false ) ),
+                        'required'   => array( 'has_digital' ),
+                    ),
+                ),
+                'required'   => array( 'wph_digital' ),
+            ),
+        ),
+        'required'   => array( 'extensions' ),
+    );
+    woocommerce_register_additional_checkout_field( array(
+        'id'                         => WPH_DIGITAL_CONSENT_FIELD,
+        'label'                      => WPH_DIGITAL_CONSENT_LABEL,
+        'optionalLabel'              => WPH_DIGITAL_CONSENT_LABEL,
+        'location'                   => 'order',
+        'type'                       => 'checkbox',
+        'required'                   => array( 'cart' => array( 'not' => $cart_not_digital ) ),
+        'hidden'                     => array( 'cart' => $cart_not_digital ),
+        'error_message'              => WPH_DIGITAL_CONSENT_ERROR,
+        // Eigene Ausgabe mit Zeitstempel (siehe unten) statt "Label: Ja" von WooCommerce.
+        'show_in_order_confirmation' => false,
+    ) );
+} );
+
+/**
+ * Block-Checkout: Zustimmung aus dem Feld in die gemeinsame Meta mit Zeitstempel übernehmen.
+ * Läuft nach Validierung und vor der Zahlung.
+ */
+add_action( 'woocommerce_store_api_checkout_order_processed', function ( $order ) {
+    if ( ! wc_string_to_bool( $order->get_meta( '_wc_other/' . WPH_DIGITAL_CONSENT_FIELD ) ) ) {
+        return;
+    }
+    if ( $order->get_meta( WPH_DIGITAL_CONSENT_META ) ) {
+        return;
+    }
+    $order->update_meta_data( WPH_DIGITAL_CONSENT_META, current_time( 'mysql' ) );
+    $order->save();
+} );
+
+/**
+ * Klassischer Checkout: Checkbox vor dem Bestell-Button anzeigen.
  */
 add_action( 'woocommerce_review_order_before_submit', function () {
-    if ( ! _wph_cart_has_downloadable() ) {
+    if ( ! _wph_cart_has_digital() ) {
         return;
     }
 
@@ -1190,9 +1289,7 @@ add_action( 'woocommerce_review_order_before_submit', function () {
                    value="1"
                    style="margin-top:.15em;flex-shrink:0;" />
             <span>
-                Ich stimme ausdrücklich zu, dass mit der Ausführung des Vertrags
-                vor Ablauf der Widerrufsfrist begonnen wird. Mir ist bekannt, dass
-                mein Widerrufsrecht mit Beginn der Ausführung erlischt.
+                <?php echo esc_html( WPH_DIGITAL_CONSENT_LABEL ); ?>
                 <?php if ( $widerruf_url ) : ?>
                     (<a href="<?php echo esc_url( $widerruf_url ); ?>" target="_blank" rel="noopener">Widerrufsbelehrung</a>)
                 <?php endif; ?>
@@ -1203,28 +1300,67 @@ add_action( 'woocommerce_review_order_before_submit', function () {
 } );
 
 /**
- * Server-seitige Validierung — läuft unabhängig vom Theme.
+ * Klassischer Checkout: serverseitige Validierung — läuft unabhängig vom Theme.
  */
 add_action( 'woocommerce_checkout_process', function () {
-    if ( ! _wph_cart_has_downloadable() ) {
+    if ( ! _wph_cart_has_digital() ) {
         return;
     }
     if ( empty( $_POST['digital_withdrawal_consent'] ) ) {
-        wc_add_notice(
-            'Bitte bestätige, dass du auf dein Widerrufsrecht bei digitalen Produkten verzichtest.',
-            'error'
-        );
+        wc_add_notice( WPH_DIGITAL_CONSENT_ERROR, 'error' );
     }
 } );
 
 /**
- * Zustimmung mit Zeitstempel in der Bestellung speichern.
+ * Klassischer Checkout: Zustimmung mit Zeitstempel in der Bestellung speichern.
  */
 add_action( 'woocommerce_checkout_order_created', function ( $order ) {
     if ( ! empty( $_POST['digital_withdrawal_consent'] ) ) {
-        $order->update_meta_data( '_digital_withdrawal_consent', current_time( 'mysql' ) );
+        $order->update_meta_data( WPH_DIGITAL_CONSENT_META, current_time( 'mysql' ) );
         $order->save();
     }
+} );
+
+/**
+ * Zeitstempel der Zustimmung lesbar formatieren (gespeichert in Site-Zeitzone).
+ */
+function _wph_digital_consent_text( $order ): string {
+    $stamp = (string) $order->get_meta( WPH_DIGITAL_CONSENT_META );
+    if ( '' === $stamp ) {
+        return '';
+    }
+    $date = date_create_immutable_from_format( 'Y-m-d H:i:s', $stamp, wp_timezone() );
+    $when = $date ? $date->format( 'd.m.Y, H:i' ) . ' Uhr' : $stamp;
+    return 'Am ' . $when . ' hast du ausdrücklich zugestimmt, dass wir vor Ablauf der Widerrufsfrist mit der Ausführung des Vertrags beginnen, und bestätigt, dass du dadurch mit Beginn der Ausführung dein Widerrufsrecht verlierst.';
+}
+
+/**
+ * Bestellbestätigung: Zustimmung in Kunden-Mails ausgeben (nicht in Admin-Mails).
+ */
+add_action( 'woocommerce_email_after_order_table', function ( $order, $sent_to_admin, $plain_text ) {
+    if ( $sent_to_admin || ! $order instanceof WC_Order ) {
+        return;
+    }
+    $text = _wph_digital_consent_text( $order );
+    if ( '' === $text ) {
+        return;
+    }
+    if ( $plain_text ) {
+        echo "\n" . 'Widerrufsrecht bei digitalen Inhalten' . "\n" . $text . "\n\n";
+        return;
+    }
+    echo '<h2>Widerrufsrecht bei digitalen Inhalten</h2><p>' . esc_html( $text ) . '</p>';
+}, 10, 3 );
+
+/**
+ * Admin-Bestellansicht: Zustimmung unter den allgemeinen Bestelldaten anzeigen.
+ */
+add_action( 'woocommerce_admin_order_data_after_order_details', function ( $order ) {
+    $text = _wph_digital_consent_text( $order );
+    if ( '' === $text ) {
+        return;
+    }
+    echo '<p class="form-field form-field-wide"><strong>Widerruf (digitale Inhalte):</strong><br>' . esc_html( $text ) . '</p>';
 } );
 
 /**
@@ -1237,6 +1373,505 @@ add_filter( 'woocommerce_order_button_text', function () {
 } );
 MUPLUGIN
     log "Must-Use Plugin: Digital Checkout Consent (Widerruf-Checkbox + Button-Lösung § 312j)"
+
+    # Widerrufsfunktion nach § 356a BGB: /vertrag-widerrufen/ (Rewrite-Endpunkt, keine Seite nötig),
+    # Link im Footer und in "Mein Konto", Eingangsbestätigung per Mail an Kunde und Shop.
+    # Shop-Empfänger: Option wph_withdrawal_email, sonst support@<Domain>.
+    cat > "${SITE_PATH}/wp-content/mu-plugins/withdrawal-function.php" <<'MUPLUGIN'
+<?php
+/**
+ * Plugin Name: Widerrufsfunktion
+ * Description: Elektronische Widerrufsfunktion nach § 356a BGB (ab 19.06.2026) unter /vertrag-widerrufen/.
+ *
+ * - Seite /vertrag-widerrufen/ als Rewrite-Endpunkt, ohne angelegte WordPress-Seite.
+ * - Link "Vertrag widerrufen" im Footer jeder Seite und im Menü "Mein Konto".
+ * - Zwei Stufen: Angaben (Bestellnummer, Name, E-Mail, optional ergänzende Angaben),
+ *   dann Schaltfläche "Widerruf bestätigen". Kein Login nötig.
+ * - Eingangsbestätigung per E-Mail (dauerhafter Datenträger) an Kunde und Shop
+ *   (Option wph_withdrawal_email, sonst support@<Domain>), mit Datum und Uhrzeit (Europe/Berlin).
+ * - Passt die Bestellnummer zu einer Bestellung mit derselben Rechnungs-E-Mail:
+ *   Bestellnotiz an der Bestellung, keine Statusänderung. Sonst wird der Widerruf
+ *   trotzdem angenommen und in der Shop-Mail als nicht zugeordnet vermerkt.
+ * - Ohne WooCommerce tut das Plugin nichts.
+ */
+
+const WPH_WITHDRAWAL_SLUG             = 'vertrag-widerrufen';
+const WPH_WITHDRAWAL_QUERY_VAR        = 'wph_withdrawal';
+const WPH_WITHDRAWAL_REWRITE_VERSION  = '1';
+const WPH_WITHDRAWAL_RATE_LIMIT       = 5;    // bestätigte Widerrufe pro IP und Stunde
+const WPH_WITHDRAWAL_MESSAGE_MAXLEN   = 2000;
+
+/**
+ * URL der Widerrufsseite (funktioniert auch ohne Permalinks).
+ */
+function wph_withdrawal_url( array $args = array() ): string {
+    $url = get_option( 'permalink_structure' )
+        ? home_url( '/' . WPH_WITHDRAWAL_SLUG . '/' )
+        : add_query_arg( WPH_WITHDRAWAL_QUERY_VAR, '1', home_url( '/' ) );
+    return $args ? add_query_arg( $args, $url ) : $url;
+}
+
+/**
+ * Empfängeradresse des Shops: Option wph_withdrawal_email, sonst support@<Domain der Site>.
+ */
+function wph_withdrawal_shop_email(): string {
+    $configured = sanitize_email( (string) get_option( 'wph_withdrawal_email', '' ) );
+    if ( '' !== $configured ) {
+        return $configured;
+    }
+    $host = (string) wp_parse_url( home_url(), PHP_URL_HOST );
+    return 'support@' . preg_replace( '/^www\./i', '', $host );
+}
+
+// ── Endpunkt ───────────────────────────────────────────────────────────────
+add_action( 'init', function () {
+    if ( ! class_exists( 'WooCommerce' ) ) {
+        return;
+    }
+    add_rewrite_rule( '^' . WPH_WITHDRAWAL_SLUG . '/?$', 'index.php?' . WPH_WITHDRAWAL_QUERY_VAR . '=1', 'top' );
+} );
+
+// Einmalig neu schreiben, erst nach init — sonst fehlen Regeln, die andere Plugins später anmelden.
+add_action( 'wp_loaded', function () {
+    if ( ! class_exists( 'WooCommerce' ) || WPH_WITHDRAWAL_REWRITE_VERSION === get_option( 'wph_withdrawal_rewrite_version' ) ) {
+        return;
+    }
+    flush_rewrite_rules( false );
+    update_option( 'wph_withdrawal_rewrite_version', WPH_WITHDRAWAL_REWRITE_VERSION );
+} );
+
+add_filter( 'query_vars', function ( $vars ) {
+    $vars[] = WPH_WITHDRAWAL_QUERY_VAR;
+    return $vars;
+} );
+
+// ── Links ──────────────────────────────────────────────────────────────────
+add_action( 'wp_footer', function () {
+    if ( ! class_exists( 'WooCommerce' ) ) {
+        return;
+    }
+    echo '<div class="wph-withdrawal-link" style="text-align:center;padding:1em;font-size:1rem;line-height:1.5;">'
+        . '<a href="' . esc_url( wph_withdrawal_url() ) . '" style="text-decoration:underline;">Vertrag widerrufen</a>'
+        . '</div>';
+} );
+
+add_filter( 'woocommerce_account_menu_items', function ( $items ) {
+    $result = array();
+    foreach ( $items as $key => $label ) {
+        if ( 'customer-logout' === $key ) {
+            $result[ WPH_WITHDRAWAL_SLUG ] = 'Vertrag widerrufen';
+        }
+        $result[ $key ] = $label;
+    }
+    if ( ! isset( $result[ WPH_WITHDRAWAL_SLUG ] ) ) {
+        $result[ WPH_WITHDRAWAL_SLUG ] = 'Vertrag widerrufen';
+    }
+    return $result;
+}, 20 );
+
+add_filter( 'woocommerce_get_endpoint_url', function ( $url, $endpoint ) {
+    return WPH_WITHDRAWAL_SLUG === $endpoint ? wph_withdrawal_url() : $url;
+}, 10, 2 );
+
+// ── Seite ausliefern ───────────────────────────────────────────────────────
+add_action( 'template_redirect', function () {
+    if ( ! class_exists( 'WooCommerce' ) || ! get_query_var( WPH_WITHDRAWAL_QUERY_VAR ) ) {
+        return;
+    }
+    global $wp_query;
+    $wp_query->is_404  = false;
+    $wp_query->is_home = false;
+    status_header( 200 );
+    // Formular trägt Nonces und persönliche Daten: nie im FastCGI-Cache ablegen.
+    nocache_headers();
+
+    $view = wph_withdrawal_controller();
+
+    add_filter( 'pre_get_document_title', function () {
+        return 'Vertrag widerrufen – ' . get_bloginfo( 'name' );
+    } );
+    add_filter( 'wp_robots', 'wp_robots_no_robots' );
+
+    get_header();
+    wph_withdrawal_render( $view );
+    get_footer();
+    exit;
+} );
+
+/**
+ * Formularwerte aus POST lesen und bereinigen.
+ */
+function wph_withdrawal_read_post(): array {
+    // phpcs:disable WordPress.Security.NonceVerification.Missing -- Nonce prüft der Controller je Stufe.
+    $select = isset( $_POST['wph_order_select'] ) ? sanitize_text_field( wp_unslash( $_POST['wph_order_select'] ) ) : '';
+    $typed  = isset( $_POST['wph_order'] ) ? sanitize_text_field( wp_unslash( $_POST['wph_order'] ) ) : '';
+    $data   = array(
+        'order_select' => $select,
+        'order'        => ( '' !== $select && '__other' !== $select ) ? $select : $typed,
+        'name'         => isset( $_POST['wph_name'] ) ? sanitize_text_field( wp_unslash( $_POST['wph_name'] ) ) : '',
+        'email'        => isset( $_POST['wph_email'] ) ? sanitize_email( wp_unslash( $_POST['wph_email'] ) ) : '',
+        'message'      => isset( $_POST['wph_message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['wph_message'] ) ) : '',
+    );
+    // phpcs:enable
+    $data['order']   = mb_substr( $data['order'], 0, 64 );
+    $data['name']    = mb_substr( $data['name'], 0, 200 );
+    $data['message'] = mb_substr( $data['message'], 0, WPH_WITHDRAWAL_MESSAGE_MAXLEN );
+    return $data;
+}
+
+/**
+ * Pflichtfelder prüfen. Liefert Fehlermeldungen (leer = gültig).
+ */
+function wph_withdrawal_validate( array $data ): array {
+    $errors = array();
+    if ( '' === $data['order'] ) {
+        $errors[] = 'Bitte gib die Bestellnummer an.';
+    }
+    if ( '' === $data['name'] ) {
+        $errors[] = 'Bitte gib deinen Namen an.';
+    }
+    if ( '' === $data['email'] || ! is_email( $data['email'] ) ) {
+        $errors[] = 'Bitte gib eine gültige E-Mail-Adresse an, damit wir dir den Eingang bestätigen können.';
+    }
+    return $errors;
+}
+
+/**
+ * Vorbelegung: bei eingeloggten Kunden Name, E-Mail und letzte Bestellung.
+ */
+function wph_withdrawal_defaults(): array {
+    $data = array( 'order_select' => '', 'order' => '', 'name' => '', 'email' => '', 'message' => '' );
+    if ( ! is_user_logged_in() ) {
+        return $data;
+    }
+    $user     = wp_get_current_user();
+    $customer = new WC_Customer( $user->ID );
+    $name     = trim( $customer->get_billing_first_name() . ' ' . $customer->get_billing_last_name() );
+    $data['name']  = '' !== $name ? $name : $user->display_name;
+    $data['email'] = $customer->get_billing_email() ? $customer->get_billing_email() : $user->user_email;
+    $orders        = wph_withdrawal_user_orders();
+    if ( $orders ) {
+        $data['order_select'] = (string) array_key_first( $orders );
+    }
+    return $data;
+}
+
+/**
+ * Bestellungen des eingeloggten Kunden: Bestellnummer => Beschriftung.
+ */
+function wph_withdrawal_user_orders(): array {
+    if ( ! is_user_logged_in() ) {
+        return array();
+    }
+    $orders = wc_get_orders( array(
+        'customer_id' => get_current_user_id(),
+        'type'        => 'shop_order',
+        'limit'       => 50,
+        'orderby'     => 'date',
+        'order'       => 'DESC',
+    ) );
+    $result = array();
+    foreach ( $orders as $order ) {
+        $created = $order->get_date_created();
+        $result[ (string) $order->get_order_number() ] = 'Bestellung ' . $order->get_order_number()
+            . ( $created ? ' vom ' . wc_format_datetime( $created, 'd.m.Y' ) : '' );
+    }
+    return $result;
+}
+
+/**
+ * Rate-Limit pro IP (REMOTE_ADDR ist dank nginx real_ip die Besucher-IP).
+ * Zählt einen Versuch und liefert true, wenn das Limit schon erreicht war.
+ */
+function wph_withdrawal_rate_limited(): bool {
+    $ip   = isset( $_SERVER['REMOTE_ADDR'] ) ? (string) $_SERVER['REMOTE_ADDR'] : '';
+    $key  = 'wph_wd_rl_' . md5( $ip . wp_salt( 'nonce' ) );
+    $hits = get_transient( $key );
+    if ( ! is_array( $hits ) ) {
+        $hits = array( 'n' => 0, 't' => time() );
+    }
+    if ( $hits['n'] >= WPH_WITHDRAWAL_RATE_LIMIT ) {
+        return true;
+    }
+    $hits['n']++;
+    set_transient( $key, $hits, max( 1, HOUR_IN_SECONDS - ( time() - $hits['t'] ) ) );
+    return false;
+}
+
+/**
+ * Bestellung zur Nummer suchen; nur zurückgeben, wenn die Rechnungs-E-Mail passt.
+ * Die Nummer läuft wie bei der WooCommerce-Sendungsverfolgung durch den Filter
+ * woocommerce_shortcode_order_tracking_order_id (Plugins mit eigenen Bestellnummern).
+ */
+function wph_withdrawal_find_order( string $number, string $email ) {
+    $order_id = ltrim( $number, '#' );
+    $order    = wc_get_order( apply_filters( 'woocommerce_shortcode_order_tracking_order_id', $order_id ) );
+    if ( ! $order instanceof WC_Order ) {
+        return null;
+    }
+    if ( '' === $email || strtolower( $order->get_billing_email() ) !== strtolower( $email ) ) {
+        return null;
+    }
+    return $order;
+}
+
+/**
+ * Widerruf verarbeiten: Mails an Kunde und Shop, Bestellnotiz bei eindeutiger Zuordnung.
+ * Liefert die Daten für die Bestätigungsseite.
+ */
+function wph_withdrawal_process( array $data ): array {
+    $now      = new DateTimeImmutable( 'now', new DateTimeZone( 'Europe/Berlin' ) );
+    $received = $now->format( 'd.m.Y' ) . ' um ' . $now->format( 'H:i:s' ) . ' Uhr (deutsche Zeit)';
+    $shop     = wph_withdrawal_shop_email();
+    $site     = wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES );
+    $order    = wph_withdrawal_find_order( $data['order'], $data['email'] );
+    $message  = '' !== $data['message'] ? $data['message'] : '(keine)';
+
+    $declaration = "Ich widerrufe den Vertrag zu folgender Bestellung.\n\n"
+        . 'Bestellnummer: ' . $data['order'] . "\n"
+        . 'Name: ' . $data['name'] . "\n"
+        . 'E-Mail: ' . $data['email'] . "\n"
+        . 'Ergänzende Angaben: ' . $message . "\n\n"
+        . 'Eingegangen am ' . $received . "\n";
+
+    $customer_body = 'Hallo ' . $data['name'] . ",\n\n"
+        . 'wir haben deinen Widerruf über die Widerrufsfunktion von ' . $site . " erhalten.\n"
+        . "Mit dieser E-Mail bestätigen wir dir den Eingang deiner Erklärung.\n\n"
+        . "Inhalt deiner Erklärung:\n\n"
+        . $declaration . "\n"
+        . "Bitte bewahre diese E-Mail für deine Unterlagen auf.\n\n"
+        . $site . "\n" . home_url( '/' ) . "\n";
+
+    $customer_sent = wp_mail(
+        $data['email'],
+        'Eingangsbestätigung deines Widerrufs – Bestellung ' . $data['order'],
+        $customer_body,
+        array( 'Content-Type: text/plain; charset=UTF-8', 'Reply-To: ' . $shop )
+    );
+
+    $assignment = $order
+        ? 'Bestellung ' . $order->get_order_number() . ' zugeordnet (Rechnungs-E-Mail passt), Bestellnotiz angelegt.'
+        : 'Bestellung nicht eindeutig zugeordnet (Nummer unbekannt oder Rechnungs-E-Mail weicht ab). Bitte von Hand prüfen.';
+
+    $shop_body = "Über die Widerrufsfunktion ist ein Widerruf eingegangen.\n\n"
+        . $declaration . "\n"
+        . 'Zuordnung: ' . $assignment . "\n"
+        . 'Eingangsbestätigung an den Kunden: ' . ( $customer_sent ? 'versendet' : 'NICHT versendet (Mailfehler)' ) . "\n";
+
+    wp_mail(
+        $shop,
+        'Widerruf eingegangen – Bestellung ' . $data['order'],
+        $shop_body,
+        array( 'Content-Type: text/plain; charset=UTF-8', 'Reply-To: ' . $data['email'] )
+    );
+
+    if ( $order ) {
+        $order->add_order_note(
+            'Widerruf über die Widerrufsfunktion eingegangen am ' . $received . '. '
+            . 'Name: ' . $data['name'] . ', E-Mail: ' . $data['email'] . '. '
+            . 'Ergänzende Angaben: ' . $message . '. '
+            . 'Eingangsbestätigung an den Kunden: ' . ( $customer_sent ? 'versendet' : 'NICHT versendet' ) . '.'
+        );
+    }
+
+    return array(
+        'order'         => $data['order'],
+        'name'          => $data['name'],
+        'email'         => $data['email'],
+        'message'       => $data['message'],
+        'received'      => $received,
+        'customer_sent' => (bool) $customer_sent,
+    );
+}
+
+/**
+ * Ablauf steuern. Liefert die anzuzeigende Stufe: form | confirm | done.
+ */
+function wph_withdrawal_controller(): array {
+    // phpcs:disable WordPress.Security.NonceVerification -- Nonces werden je Stufe unten geprüft.
+    if ( isset( $_GET['eingang'] ) ) {
+        $token   = sanitize_key( wp_unslash( $_GET['eingang'] ) );
+        $receipt = '' !== $token ? get_transient( 'wph_wd_receipt_' . $token ) : false;
+        if ( is_array( $receipt ) ) {
+            return array( 'step' => 'done', 'receipt' => $receipt );
+        }
+    }
+
+    $form = array( 'step' => 'form', 'data' => wph_withdrawal_defaults(), 'errors' => array() );
+    if ( 'POST' !== ( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+        return $form;
+    }
+
+    $step = isset( $_POST['wph_step'] ) ? sanitize_key( wp_unslash( $_POST['wph_step'] ) ) : '';
+    $data = wph_withdrawal_read_post();
+    $form['data'] = $data;
+
+    if ( ! empty( $_POST['wph_hp'] ) ) {
+        $form['errors'][] = 'Die Anfrage konnte nicht verarbeitet werden. Bitte versuche es erneut.';
+        return $form;
+    }
+    if ( 'edit' === $step ) {
+        return $form;
+    }
+
+    $nonce_action = 'confirm' === $step ? 'wph_withdrawal_confirm' : 'wph_withdrawal_review';
+    $nonce        = isset( $_POST['_wph_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['_wph_nonce'] ) ) : '';
+    // phpcs:enable
+    if ( ! wp_verify_nonce( $nonce, $nonce_action ) ) {
+        $form['errors'][] = 'Die Sitzung ist abgelaufen. Bitte prüfe deine Angaben und sende das Formular erneut ab.';
+        return $form;
+    }
+    $form['errors'] = wph_withdrawal_validate( $data );
+    if ( $form['errors'] ) {
+        return $form;
+    }
+    if ( 'confirm' !== $step ) {
+        return array( 'step' => 'confirm', 'data' => $data );
+    }
+
+    if ( wph_withdrawal_rate_limited() ) {
+        $form['errors'][] = 'Von deinem Anschluss kamen in der letzten Stunde zu viele Widerrufe. Bitte versuche es später erneut oder schreibe uns an ' . wph_withdrawal_shop_email() . '.';
+        return $form;
+    }
+
+    $receipt = wph_withdrawal_process( $data );
+    $token   = bin2hex( random_bytes( 16 ) );
+    set_transient( 'wph_wd_receipt_' . $token, $receipt, HOUR_IN_SECONDS );
+    wp_safe_redirect( wph_withdrawal_url( array( 'eingang' => $token ) ), 303 );
+    exit;
+}
+
+/**
+ * Ausgabe der jeweiligen Stufe.
+ */
+function wph_withdrawal_render( array $view ): void {
+    ?>
+    <style>
+        .wph-withdrawal{max-width:720px;margin:2.5em auto;padding:0 1.25em;line-height:1.6}
+        .wph-withdrawal h1{margin-bottom:.6em}
+        .wph-withdrawal label{display:block;font-weight:600;margin:1em 0 .3em}
+        .wph-withdrawal input[type=text],.wph-withdrawal input[type=email],.wph-withdrawal select,.wph-withdrawal textarea{width:100%;max-width:100%;padding:.6em;font-size:1rem}
+        .wph-withdrawal .wph-hint{font-size:.9em;margin:.2em 0 0}
+        .wph-withdrawal .wph-errors{border-left:4px solid #b32d2e;background:#fcf0f1;padding:.8em 1em;margin:1em 0}
+        .wph-withdrawal .wph-box{border-left:4px solid #2271b1;background:#f0f6fc;padding:.8em 1em;margin:1em 0}
+        .wph-withdrawal button{margin:1.5em .6em 0 0;padding:.8em 1.4em;font-size:1rem;cursor:pointer}
+        .wph-withdrawal .wph-hp{position:absolute;left:-10000px;width:1px;height:1px;overflow:hidden}
+        .wph-withdrawal dt{font-weight:600}
+        .wph-withdrawal dd{margin:0 0 .6em}
+    </style>
+    <div class="wph-withdrawal">
+    <?php
+    if ( 'done' === $view['step'] ) {
+        $r = $view['receipt'];
+        ?>
+        <h1>Dein Widerruf ist bei uns eingegangen</h1>
+        <div class="wph-box" role="status">
+            <p><strong>Eingegangen am <?php echo esc_html( $r['received'] ); ?></strong></p>
+            <?php if ( $r['customer_sent'] ) : ?>
+                <p>Eine Eingangsbestätigung haben wir an <?php echo esc_html( $r['email'] ); ?> gesendet.</p>
+            <?php else : ?>
+                <p>Die Eingangsbestätigung per E-Mail konnte nicht versendet werden. Bitte speichere oder drucke diese Seite als Nachweis.</p>
+            <?php endif; ?>
+        </div>
+        <dl>
+            <dt>Bestellnummer</dt><dd><?php echo esc_html( $r['order'] ); ?></dd>
+            <dt>Name</dt><dd><?php echo esc_html( $r['name'] ); ?></dd>
+            <dt>E-Mail</dt><dd><?php echo esc_html( $r['email'] ); ?></dd>
+            <?php if ( '' !== $r['message'] ) : ?>
+                <dt>Ergänzende Angaben</dt><dd><?php echo nl2br( esc_html( $r['message'] ) ); ?></dd>
+            <?php endif; ?>
+        </dl>
+        <p><a href="<?php echo esc_url( home_url( '/' ) ); ?>">Zur Startseite</a></p>
+        </div>
+        <?php
+        return;
+    }
+
+    $d = $view['data'];
+
+    if ( 'confirm' === $view['step'] ) {
+        ?>
+        <h1>Widerruf bestätigen</h1>
+        <p>Bitte prüfe deine Angaben. Mit Klick auf „Widerruf bestätigen“ erklärst du den Widerruf des Vertrags zu dieser Bestellung.</p>
+        <dl>
+            <dt>Bestellnummer</dt><dd><?php echo esc_html( $d['order'] ); ?></dd>
+            <dt>Name</dt><dd><?php echo esc_html( $d['name'] ); ?></dd>
+            <dt>E-Mail</dt><dd><?php echo esc_html( $d['email'] ); ?></dd>
+            <?php if ( '' !== $d['message'] ) : ?>
+                <dt>Ergänzende Angaben</dt><dd><?php echo nl2br( esc_html( $d['message'] ) ); ?></dd>
+            <?php endif; ?>
+        </dl>
+        <form method="post" action="<?php echo esc_url( wph_withdrawal_url() ); ?>">
+            <input type="hidden" name="wph_order" value="<?php echo esc_attr( $d['order'] ); ?>">
+            <input type="hidden" name="wph_name" value="<?php echo esc_attr( $d['name'] ); ?>">
+            <input type="hidden" name="wph_email" value="<?php echo esc_attr( $d['email'] ); ?>">
+            <input type="hidden" name="wph_message" value="<?php echo esc_attr( $d['message'] ); ?>">
+            <?php wp_nonce_field( 'wph_withdrawal_confirm', '_wph_nonce', false ); ?>
+            <button type="submit" name="wph_step" value="confirm">Widerruf bestätigen</button>
+            <button type="submit" name="wph_step" value="edit">Angaben ändern</button>
+        </form>
+        </div>
+        <?php
+        return;
+    }
+
+    $orders = wph_withdrawal_user_orders();
+    // Zurück aus der Bestätigung: Auswahl aus der übergebenen Nummer wiederherstellen.
+    if ( $orders && '' === $d['order_select'] && '' !== $d['order'] ) {
+        $d['order_select'] = isset( $orders[ $d['order'] ] ) ? $d['order'] : '__other';
+    }
+    ?>
+    <h1>Vertrag widerrufen</h1>
+    <p>Hier kannst du einen Vertrag widerrufen, den du mit uns geschlossen hast. Ein Login ist nicht nötig. Im nächsten Schritt bestätigst du den Widerruf.</p>
+    <?php if ( ! empty( $view['errors'] ) ) : ?>
+        <div class="wph-errors" role="alert">
+            <?php foreach ( $view['errors'] as $error ) : ?>
+                <p><?php echo esc_html( $error ); ?></p>
+            <?php endforeach; ?>
+        </div>
+    <?php endif; ?>
+    <form method="post" action="<?php echo esc_url( wph_withdrawal_url() ); ?>" novalidate>
+        <?php if ( $orders ) : ?>
+            <label for="wph_order_select">Bestellung *</label>
+            <select id="wph_order_select" name="wph_order_select">
+                <?php foreach ( $orders as $number => $label ) : ?>
+                    <option value="<?php echo esc_attr( $number ); ?>" <?php selected( $d['order_select'], (string) $number ); ?>><?php echo esc_html( $label ); ?></option>
+                <?php endforeach; ?>
+                <option value="__other" <?php selected( $d['order_select'], '__other' ); ?>>Andere Bestellnummer (unten eingeben)</option>
+            </select>
+            <label for="wph_order">Andere Bestellnummer</label>
+            <input type="text" id="wph_order" name="wph_order" maxlength="64" value="<?php echo esc_attr( '__other' === $d['order_select'] ? $d['order'] : '' ); ?>">
+        <?php else : ?>
+            <label for="wph_order">Bestellnummer *</label>
+            <input type="text" id="wph_order" name="wph_order" required aria-required="true" maxlength="64" value="<?php echo esc_attr( $d['order'] ); ?>">
+            <p class="wph-hint">Du findest sie in deiner Bestellbestätigung.</p>
+        <?php endif; ?>
+
+        <label for="wph_name">Name *</label>
+        <input type="text" id="wph_name" name="wph_name" required aria-required="true" maxlength="200" autocomplete="name" value="<?php echo esc_attr( $d['name'] ); ?>">
+
+        <label for="wph_email">E-Mail-Adresse *</label>
+        <input type="email" id="wph_email" name="wph_email" required aria-required="true" autocomplete="email" value="<?php echo esc_attr( $d['email'] ); ?>">
+        <p class="wph-hint">An diese Adresse senden wir dir die Eingangsbestätigung.</p>
+
+        <label for="wph_message">Ergänzende Angaben (optional)</label>
+        <textarea id="wph_message" name="wph_message" rows="4" maxlength="<?php echo (int) WPH_WITHDRAWAL_MESSAGE_MAXLEN; ?>"><?php echo esc_textarea( $d['message'] ); ?></textarea>
+        <p class="wph-hint">Zum Beispiel, welche Artikel der Bestellung du widerrufst. Einen Grund musst du nicht angeben.</p>
+
+        <div class="wph-hp" aria-hidden="true">
+            <label for="wph_hp">Bitte leer lassen</label>
+            <input type="text" id="wph_hp" name="wph_hp" tabindex="-1" autocomplete="off" value="">
+        </div>
+
+        <?php wp_nonce_field( 'wph_withdrawal_review', '_wph_nonce', false ); ?>
+        <button type="submit" name="wph_step" value="review">Weiter zur Bestätigung</button>
+        <p class="wph-hint">* Pflichtfeld</p>
+    </form>
+    </div>
+    <?php
+}
+MUPLUGIN
+    log "Must-Use Plugin: Widerrufsfunktion (§ 356a BGB, /vertrag-widerrufen/)"
 fi
 
 # ── Must-Use Plugin: Maintenance Mode ────────────────────────────────────
