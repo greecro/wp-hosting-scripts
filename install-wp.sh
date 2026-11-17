@@ -334,6 +334,11 @@ fi
 # Dateien trotzdem ausliefern kann, kommt www-data in die Site-Gruppe (nginx-RESTART
 # unten übernimmt die neue Gruppenmitgliedschaft).
 usermod -aG "$SYSTEM_USER" www-data
+# wp-cli-Cache ausserhalb des Webroots: das Home des Site-Users ist der Webroot, ohne
+# eigenes Verzeichnis landete der Download-Cache unter $HOME/.wp-cli (per HTTP abrufbar).
+# Der wp-Wrapper aus setup-web.sh setzt WP_CLI_CACHE_DIR=/var/cache/wp-cli/<user>.
+install -d -o root -g root -m 755 /var/cache/wp-cli
+install -d -o "$SYSTEM_USER" -g "$SYSTEM_USER" -m 700 "/var/cache/wp-cli/${SYSTEM_USER}"
 log "Systemuser: ${SYSTEM_USER}"
 
 # ── Site-Verzeichnis ──────────────────────────────────────────────────────

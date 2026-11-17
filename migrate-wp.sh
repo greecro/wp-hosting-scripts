@@ -228,6 +228,11 @@ wp redis enable --path="$SITE_PATH" --allow-root 2>/dev/null || true
 useradd -r -s /sbin/nologin -d "$SITE_PATH" "$SYSTEM_USER" 2>/dev/null || true
 # Mandantentrennung (wie install-wp): eigene Site-Gruppe, www-data (nginx) darf lesen
 usermod -aG "$SYSTEM_USER" www-data
+# wp-cli-Cache ausserhalb des Webroots: das Home des Site-Users ist der Webroot, ohne
+# eigenes Verzeichnis landete der Download-Cache unter $HOME/.wp-cli (per HTTP abrufbar).
+# Der wp-Wrapper aus setup-web.sh setzt WP_CLI_CACHE_DIR=/var/cache/wp-cli/<user>.
+install -d -o root -g root -m 755 /var/cache/wp-cli
+install -d -o "$SYSTEM_USER" -g "$SYSTEM_USER" -m 700 "/var/cache/wp-cli/${SYSTEM_USER}"
 chown -R "${SYSTEM_USER}:${SYSTEM_USER}" "$SITE_PATH"
 find "$SITE_PATH" -type d -exec chmod 750 {} \;
 find "$SITE_PATH" -type f -exec chmod 640 {} \;

@@ -408,8 +408,28 @@ if ! printf '%s  wp-cli.phar\n' "$(cat wp-cli.phar.sha512)" | sha512sum -c - >/d
 fi
 rm -f wp-cli.phar.sha512
 chmod +x wp-cli.phar
-mv wp-cli.phar /usr/local/bin/wp
-log "WP-CLI installiert (SHA512 verifiziert)"
+# Phar unter /usr/local/lib, davor ein Wrapper als /usr/local/bin/wp: er legt den
+# Download-Cache nach /var/cache/wp-cli/<user> statt nach $HOME/.wp-cli. Das Home der
+# Site-User ist ihr Webroot, sonst liefert nginx den Cache aus. sudo setzt die Umgebung
+# zurueck, deshalb der Wrapper statt einer Umgebungsvariable. wp cli update ersetzt nur das Phar.
+install -d -m 755 /usr/local/lib/wp-cli
+mv wp-cli.phar /usr/local/lib/wp-cli/wp-cli.phar
+cat > /usr/local/bin/wp.neu <<'WPWRAP'
+#!/bin/sh
+# wp-cli-Wrapper (wp-hosting-scripts): legt den Download-Cache ausserhalb des Webroots ab.
+# Das Home der Site-User ist ihr Webroot, wp-cli cached sonst nach $HOME/.wp-cli/cache
+# und nginx liefert das aus. Phar: /usr/local/lib/wp-cli/wp-cli.phar (wp cli update ersetzt nur das Phar).
+if [ -z "${WP_CLI_CACHE_DIR:-}" ]; then
+    WP_CLI_CACHE_DIR="/var/cache/wp-cli/$(id -un)"
+    export WP_CLI_CACHE_DIR
+fi
+exec /usr/local/lib/wp-cli/wp-cli.phar "$@"
+WPWRAP
+chmod 755 /usr/local/bin/wp.neu
+mv -f /usr/local/bin/wp.neu /usr/local/bin/wp
+install -d -o root -g root -m 755 /var/cache/wp-cli
+install -d -o root -g root -m 700 /var/cache/wp-cli/root
+log "WP-CLI installiert (SHA512 verifiziert, Cache unter /var/cache/wp-cli)"
 
 # ── PHP 8.3 konfigurieren ─────────────────────────────────────────────────
 PHP_INI="/etc/php/8.3/fpm/php.ini"
