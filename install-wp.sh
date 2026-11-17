@@ -1926,7 +1926,8 @@ MUPLUGIN
     log "Must-Use Plugin: Clarity-Maskierung sensibler Shopseiten"
 
     # Löschanträge: sperren statt löschen (Sperrvermerk an den Bestellungen, FSLM-Inhaber leeren,
-    # Kundenkonto löschen; gesperrte Bestellungen nicht an BaseSend). Nur bestätigte Einzelanträge.
+    # Kundenkonto löschen). Gesperrte und anonymisierte Bestellungen gehen nicht an BaseSend
+    # (Filter basend_skip_order ab 1.7.0, davor Ersatz von außen). Nur bestätigte Einzelanträge.
     cat > "${SITE_PATH}/wp-content/mu-plugins/privacy-erasure.php" <<'MUPLUGIN'
 <?php
 /**
@@ -2030,39 +2031,78 @@ function wph_erasure_block( $request_id ): void {
 }
 
 /*
- * Gesperrte Bestellungen gehen nicht an BaseSend. Das Plugin BaseSend hat dafür keinen Filter, daher:
+ * Gesperrte und anonymisierte Bestellungen gehen nicht an BaseSend.
+ * Gesperrt: Meta wph_erasure_blocked (Löschantrag, siehe oben). Anonymisiert: Meta wph_retention_anonymized
+ * (Frist-Anonymisierung durch order-anonymize.sh) oder _anonymized = yes (WooCommerce-Löschroutine). Sonst käme
+ * eine anonymisierte Bestellung beim nächsten Abgleich ohne E-Mail zurück und würde in BaseSend neu angelegt.
+ *
+ * BaseSend ab 1.7.0: Filter basend_skip_order, gilt für Push und Abruf.
+ * BaseSend vor 1.7.0 (kein Filter): Ersatz von außen, siehe wph_erasure_legacy_basend_block().
+ */
+function wph_order_is_blocked( $order ): bool {
+    return is_object( $order ) && method_exists( $order, 'get_meta' ) && (
+        '' !== (string) $order->get_meta( WPH_ERASURE_META, true )
+        || '' !== (string) $order->get_meta( 'wph_retention_anonymized', true )
+        || 'yes' === (string) $order->get_meta( '_anonymized', true )
+    );
+}
+
+add_filter( 'basend_skip_order', function ( $skip, $order = null ) {
+    return $skip || wph_order_is_blocked( $order );
+}, 10, 2 );
+
+// mu-plugins laden vor den Plugins: die Version von BaseSend steht erst bei plugins_loaded fest.
+function wph_erasure_basend_needs_legacy_block( bool $has_class, string $version ): bool {
+    return $has_class && ( '' === $version || version_compare( $version, '1.7.0', '<' ) );
+}
+
+add_action( 'plugins_loaded', function () {
+    if ( wph_erasure_basend_needs_legacy_block( class_exists( 'Basend_Orders' ), defined( 'BASEND_PLUGIN_VERSION' ) ? (string) BASEND_PLUGIN_VERSION : '' ) ) {
+        wph_erasure_legacy_basend_block();
+    }
+}, 20 );
+
+/*
+ * Ersatz für BaseSend vor 1.7.0:
  * - Push (Action basend_push_order): für eine gesperrte Bestellung den BaseSend-Callback für diesen
  *   einen Aufruf aushängen und danach wieder einhängen.
  * - Abruf (REST basend/v1/orders, wc_get_orders): während dieser Anfrage gesperrte Bestellungen per
  *   meta_query ausschließen.
  */
-add_action( 'basend_push_order', function ( $order_id ) {
+function wph_erasure_legacy_basend_block(): void {
+    add_action( 'basend_push_order', 'wph_erasure_legacy_push_guard', 9 );
+    add_filter( 'rest_request_before_callbacks', 'wph_erasure_legacy_pull_guard', 10, 3 );
+}
+
+function wph_erasure_legacy_push_guard( $order_id ) {
     if ( ! class_exists( 'Basend_Orders' ) ) {
         return;
     }
     $order = wc_get_order( (int) $order_id );
-    if ( $order && '' !== (string) $order->get_meta( WPH_ERASURE_META, true ) ) {
+    if ( $order && wph_order_is_blocked( $order ) ) {
         remove_action( 'basend_push_order', array( 'Basend_Orders', 'push' ), 10 );
         add_action( 'basend_push_order', 'wph_erasure_restore_basend_push', 11 );
     }
-}, 9 );
+}
 
 function wph_erasure_restore_basend_push(): void {
     remove_action( 'basend_push_order', 'wph_erasure_restore_basend_push', 11 );
     add_action( 'basend_push_order', array( 'Basend_Orders', 'push' ), 10, 1 );
 }
 
-add_filter( 'rest_request_before_callbacks', function ( $response, $handler, $request ) {
+function wph_erasure_legacy_pull_guard( $response, $handler, $request ) {
     if ( $request instanceof WP_REST_Request && 0 === strpos( $request->get_route(), '/basend/v1/orders' ) ) {
         add_filter( 'woocommerce_order_query_args', 'wph_erasure_exclude_blocked' );
     }
     return $response;
-}, 10, 3 );
+}
 
 function wph_erasure_exclude_blocked( $args ) {
-    $meta_query           = isset( $args['meta_query'] ) && is_array( $args['meta_query'] ) ? $args['meta_query'] : array();
-    $meta_query[]         = array( 'key' => WPH_ERASURE_META, 'compare' => 'NOT EXISTS' );
-    $args['meta_query']   = $meta_query;
+    $meta_query         = isset( $args['meta_query'] ) && is_array( $args['meta_query'] ) ? $args['meta_query'] : array();
+    $meta_query[]       = array( 'key' => WPH_ERASURE_META, 'compare' => 'NOT EXISTS' );
+    $meta_query[]       = array( 'key' => 'wph_retention_anonymized', 'compare' => 'NOT EXISTS' );
+    $meta_query[]       = array( 'key' => '_anonymized', 'compare' => 'NOT EXISTS' );
+    $args['meta_query'] = $meta_query;
     return $args;
 }
 MUPLUGIN
