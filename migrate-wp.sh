@@ -329,6 +329,8 @@ server {
         expires 30d; add_header Cache-Control "public, no-transform"; log_not_found off;
     }
 
+    # robots.txt kommt aus WordPress (virtuell), nicht als statische Datei (sonst faengt die .txt-Regel oben mit 404 ab)
+    location = /robots.txt     { try_files \$uri /index.php?\$args; }
     location = /xmlrpc.php     { deny all; }
     location = /wp-login.php   { limit_req zone=login burst=3 nodelay; include snippets/fastcgi-php.conf; fastcgi_pass unix:${SOCK}; include fastcgi_params; }
 }

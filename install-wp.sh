@@ -464,6 +464,9 @@ server {
         log_not_found off;
     }
 
+    # robots.txt kommt aus WordPress (virtuell, SEOPress), nicht als statische Datei: ohne diese Zeile faengt die
+    # Regel fuer .txt unten die Anfrage ab und antwortet 404, weil keine Datei existiert.
+    location = /robots.txt                 { try_files \$uri /index.php?\$args; }
     location = /xmlrpc.php                 { deny all; }
 
     # OPcache-Status (Basic-Auth, gleiches Passwort wie phpMyAdmin)
