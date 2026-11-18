@@ -435,7 +435,7 @@ log "WP-CLI installiert (SHA512 verifiziert, Cache unter /var/cache/wp-cli)"
 PHP_INI="/etc/php/8.3/fpm/php.ini"
 
 MEM_LIMIT="512M"; UPLOAD_SIZE="128M"; MAX_EXEC="300"
-MAX_INPUT_VARS="10000"; OPCACHE_MEM="256"; OPCACHE_FILES="20000"
+MAX_INPUT_VARS="10000"; OPCACHE_MEM="768"; OPCACHE_FILES="60000"
 
 sed -i "s/memory_limit = .*/memory_limit = ${MEM_LIMIT}/" "$PHP_INI"
 sed -i "s/upload_max_filesize = .*/upload_max_filesize = ${UPLOAD_SIZE}/" "$PHP_INI"
@@ -445,20 +445,23 @@ sed -i "s/max_input_time = .*/max_input_time = ${MAX_EXEC}/" "$PHP_INI"
 sed -i "/max_input_vars/d" "$PHP_INI"
 echo "max_input_vars = ${MAX_INPUT_VARS}" >> "$PHP_INI"
 
-# OPcache (idempotent — nur anhängen wenn noch nicht vorhanden)
-grep -q '^\[opcache\]' "$PHP_INI" || cat >> "$PHP_INI" <<EOF
-
+# OPcache: eigene Datei in conf.d, nie an die php.ini anhaengen. Die Debian-php.ini traegt schon einen
+# [opcache]-Abschnitt (nur Kommentare), ein "grep -q '^\[opcache\]'" haette den Eintrag daher nie geschrieben,
+# und es haetten die Debian-Standardwerte (128 MB, 10000 Dateien) gegolten. Die Datei wird bei jedem Lauf
+# neu geschrieben (idempotent), 99- laedt nach 10-opcache.ini und gewinnt.
+cat > /etc/php/8.3/fpm/conf.d/99-wp-hosting-opcache.ini <<EOF
+; wp-hosting-scripts: OPcache fuer den PHP-FPM-Stack
 [opcache]
 opcache.enable=1
 opcache.memory_consumption=${OPCACHE_MEM}
-opcache.interned_strings_buffer=16
+opcache.interned_strings_buffer=32
 opcache.max_accelerated_files=${OPCACHE_FILES}
 opcache.revalidate_freq=2
-opcache.fast_shutdown=1
-opcache.enable_cli=0
 opcache.validate_timestamps=1
 opcache.save_comments=1
+opcache.enable_cli=0
 EOF
+chmod 644 /etc/php/8.3/fpm/conf.d/99-wp-hosting-opcache.ini
 log "PHP 8.3 konfiguriert (${MEM_LIMIT} RAM, OPcache ${OPCACHE_MEM}MB)"
 
 # ── Redis konfigurieren ───────────────────────────────────────────────────
